@@ -67,7 +67,7 @@
 克隆仓库到本地自行构建或按需修改：
 
 ```bash
-git clone https://github.com/your-username/kimi-macos.git
+git clone https://github.com/JianMoYu/kimi-macos.git
 cd kimi-macos
 
 # 编译生成 Kimi.app
