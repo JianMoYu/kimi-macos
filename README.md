@@ -44,7 +44,7 @@
 
 ## 🛠 前置要求
 
-在运行或构建本客户端前，请确保本地已安装以下组件：
+在构建或运行前，请确保本地已安装以下组件：
 
 1. **Kimi CLI**：
    ```bash
@@ -55,7 +55,7 @@
    ```bash
    brew install tmux
    ```
-3. **Xcode Command Line Tools**（若需从源码构建）：
+3. **Xcode Command Line Tools**：
    ```bash
    xcode-select --install
    ```
@@ -64,27 +64,22 @@
 
 ## 🚀 快速开始
 
-### 方式 1：直接下载安装（推荐）
-前往 GitHub [Releases](https://github.com/your-username/kimi-macos/releases) 页面，下载最新的 `Kimi-Installer-arm64.dmg`（或 x86_64），双击打开后将 `Kimi.app` 拖入 `Applications` 即可使用。
-
-### 方式 2：本地源码一键构建
-
-克隆仓库并执行打包脚本：
+克隆仓库到本地自行构建或按需修改：
 
 ```bash
 git clone https://github.com/your-username/kimi-macos.git
 cd kimi-macos
 
-# 编译应用
+# 编译生成 Kimi.app
 ./scripts/build.sh
 
 # 或一键生成 DMG 安装包
 ./scripts/package_dmg.sh
 ```
 
-构建完成后，产物将生成在 `dist/` 目录下：
-- `dist/Kimi.app`
-- `dist/Kimi-Installer-arm64.dmg`
+构建完成后，产物位于 `dist/` 目录：
+- `dist/Kimi.app`：可以直接双击运行，或拖入 `/Applications`
+- `dist/Kimi-Installer-arm64.dmg`：可分发安装镜像
 
 ---
 
@@ -92,9 +87,6 @@ cd kimi-macos
 
 ```
 kimi-macos/
-├── .github/
-│   └── workflows/
-│       └── build.yml             # GitHub Actions CI/CD 自动构建发布
 ├── Sources/
 │   ├── App.swift                 # 应用程序入口、单实例窗口及尺寸持久化
 │   ├── ContentView.swift         # 顶部工具栏、用量监控看板及 UI 交互
@@ -122,17 +114,6 @@ kimi-macos/
 | `Cmd + Shift + R` | 重启后台 Kimi 服务（加载最新更新） |
 | `Cmd + W` | 隐藏当前窗口（保持后台常驻，不中断任务） |
 | `Cmd + Q` | 退出 App（后台 tmux 服务仍将保持运行） |
-
----
-
-## 🤝 参与贡献
-
-欢迎提交 Issue 与 Pull Request！
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交改动 (`git commit -m 'Add some amazing feature'`)
-4. 推送至分支 (`git push origin feature/amazing-feature`)
-5. 新建 Pull Request
 
 ---
 
