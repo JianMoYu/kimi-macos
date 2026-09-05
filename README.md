@@ -1,70 +1,34 @@
 # Kimi Code for macOS
 
 <p align="center">
-  <img src="Resources/AppIcon.png" width="128" height="128" alt="Kimi Code macOS Icon" />
+  <img src="Resources/AppIcon.png" width="100" height="100" alt="Kimi Code macOS Icon" />
 </p>
 
-<p align="center">
-  <strong>专为 Kimi Code 打造的轻量原生 macOS 客户端</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-macOS%2013.0+-blue?logo=apple" alt="macOS" />
-  <img src="https://img.shields.io/badge/Language-SwiftUI%20%7C%20WebKit-F05138?logo=swift" alt="Swift" />
-  <img src="https://img.shields.io/badge/Bundle%20Size-＜%201%20MB-success" alt="Bundle Size" />
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License" />
-</p>
+专为 Kimi Code (`kimi web`) 封装的 macOS 原生客户端，基于 SwiftUI 与 WebKit 构建。
 
 ---
 
-## 📖 项目简介
+## 功能
 
-很多开发者在本地使用 Kimi Code 时，经常遇到以下痛点：
-1. 每次都需要打开终端手动敲命令启动服务（`kimi web`）；
-2. 浏览器打开后混杂在数十个标签页中，容易被误关或难以快速定位；
-3. 想要了解套餐用量需要每次层层点击进入「头像 -> 设置 -> 账户」；
-4. 退出浏览器或终端断开后，正在运行的长时间 Agent 任务容易中断。
-
-**Kimi Code macOS Client** 采用纯原生 **SwiftUI + WebKit** 构建，为 Kimi Code 提供独立的系统窗口、专属 Dock 图标、后台服务守护与实时用量看板，打造极致丝滑的本地编码体验。
-
----
-
-## ✨ 核心特性
-
-- ⚡️ **极致原生轻量**：无任何 Electron 冗余，打包体积仅约 **800 KB**，内存占用低，启动极快。
-- 📊 **顶部实时用量看板**：直接在顶部工具栏居中展示**每周限额**与**5小时限额**已用百分比及重置倒计时；超过 90% 智能标红预警，无需进入设置。
-- 🍃 **智能按需轮询（节能）**：仅在用户前台使用时每 30 秒自动同步；当窗口隐藏、最小化时**立刻销毁轮询定时器**，实现零后台网络 IO 与零 CPU 开销。
-- 🚀 **后台服务自动拉起与守护**：启动 App 时并发检测本地端口（默认 `58627`），未运行时自动通过 `tmux` 静默拉起；关闭窗口后后台服务继续常驻。
-- 🛑 **0.0 秒瞬间唤起（Agent 任务不中断）**：点击左上角红叉「X」仅隐藏窗口而不销毁，内存保持常驻，长时间 Agent 任务输出永不中断；点击 Dock 图标 0 延迟秒开，彻底告别白屏重载。
-- 🔑 **全自动免密与 Token 注入**：内置本地免密模式（`--dangerous-bypass-auth`），并提供持久化 Token 自动读取机制，绝不弹出“需要服务器 token”弹窗。
-- 📁 **工作目录便捷切换**：顶部一键选择本地项目目录，自动记忆并在切换时提示重启生效。
-- 🔄 **无缝版本升级**：Kimi Code 更新后，点击顶部「重启服务」即可无缝切换至最新的 Kimi 二进制与 Web 前端。
+- **后台常驻与服务自启**：打开 App 自动检测本地 `58627` 端口，未启动时自动通过 `tmux` 拉起后台服务；关闭 App 时保留服务继续运行。
+- **顶部显示套餐用量**：直接在顶部工具栏显示每周限额与 5 小时限额百分比及重置倒计时（仅在前台活跃时刷新，窗口隐藏时暂停轮询）。
+- **免密自动登录**：默认开启 `--dangerous-bypass-auth` 并自动读取本地 Token，无需手动输入。
+- **快速切换工作目录**：顶部支持选择项目路径，切换时可一键重启服务生效，并自动记忆。
+- **窗口与任务守护**：点击「X」仅隐藏窗口而不销毁，后台 Agent 任务不中断；再次打开瞬间呈现，自动记忆窗口尺寸。
+- **轻量原生**：无 Electron 依赖，打包体积约 800 KB。
 
 ---
 
-## 🛠 前置要求
+## 前置要求
 
-在构建或运行前，请确保本地已安装以下组件：
-
-1. **Kimi CLI**：
-   ```bash
-   which kimi
-   # 确保已安装官方 kimi 命令行工具
-   ```
-2. **tmux**（用于后台会话守护）：
-   ```bash
-   brew install tmux
-   ```
-3. **Xcode Command Line Tools**：
-   ```bash
-   xcode-select --install
-   ```
+- macOS 13.0+
+- [Kimi CLI](https://github.com/MoonshotAI/kimi-code)：已安装且可执行 `kimi` 命令
+- `tmux`：用于后台会话守护 (`brew install tmux`)
+- Xcode Command Line Tools（仅源码构建需要）
 
 ---
 
-## 🚀 快速开始
-
-克隆仓库到本地自行构建或按需修改：
+## 构建与运行
 
 ```bash
 git clone https://github.com/JianMoYu/kimi-macos.git
@@ -77,47 +41,23 @@ cd kimi-macos
 ./scripts/package_dmg.sh
 ```
 
-构建完成后，产物位于 `dist/` 目录：
-- `dist/Kimi.app`：可以直接双击运行，或拖入 `/Applications`
-- `dist/Kimi-Installer-arm64.dmg`：可分发安装镜像
+构建产物位于 `dist/` 目录：
+- `dist/Kimi.app`
+- `dist/Kimi-Installer-arm64.dmg`
 
 ---
 
-## 📂 项目结构
+## 快捷键
 
-```
-kimi-macos/
-├── Sources/
-│   ├── App.swift                 # 应用程序入口、单实例窗口及尺寸持久化
-│   ├── ContentView.swift         # 顶部工具栏、用量监控看板及 UI 交互
-│   ├── KimiServiceManager.swift  # tmux 会话调度、端口健康检查与智能轮询
-│   └── WebView.swift             # WKWebView 封装、暗黑底色及鉴权脚本注入
-├── Resources/
-│   ├── AppIcon.icns              # macOS 原生高清 App 图标
-│   ├── AppIcon.png               # README 网页展示图标
-│   └── Info.plist                # 应用配置清单
-├── scripts/
-│   ├── build.sh                  # 自动化编译脚本
-│   ├── package_dmg.sh            # DMG 镜像打包脚本
-│   └── kimi-web.sh               # 独立的后台启动与守护 shell 脚本
-├── .gitignore
-├── LICENSE                       # MIT 许可证
-└── README.md
-```
-
----
-
-## ⌨️ 常用快捷键
-
-| 快捷键 | 功能描述 |
+| 快捷键 | 说明 |
 | :--- | :--- |
-| `Cmd + R` | 刷新 Web 页面并立即同步用量数据 |
-| `Cmd + Shift + R` | 重启后台 Kimi 服务（加载最新更新） |
-| `Cmd + W` | 隐藏当前窗口（保持后台常驻，不中断任务） |
-| `Cmd + Q` | 退出 App（后台 tmux 服务仍将保持运行） |
+| `Cmd + R` | 刷新页面与用量 |
+| `Cmd + Shift + R` | 重启后台 Kimi 服务 |
+| `Cmd + W` | 隐藏窗口（后台任务继续执行） |
+| `Cmd + Q` | 退出 App（后台服务保留） |
 
 ---
 
-## 📄 开源许可
+## 开源协议
 
-本项目基于 [MIT License](LICENSE) 开源。
+[MIT License](LICENSE)
