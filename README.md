@@ -1,7 +1,7 @@
 # Kimi Code for macOS
 
 <p align="center">
-  <img src="Resources/AppIcon.icns" width="128" height="128" alt="Kimi Code macOS Icon" />
+  <img src="Resources/AppIcon.png" width="128" height="128" alt="Kimi Code macOS Icon" />
 </p>
 
 <p align="center">
@@ -93,7 +93,8 @@ kimi-macos/
 │   ├── KimiServiceManager.swift  # tmux 会话调度、端口健康检查与智能轮询
 │   └── WebView.swift             # WKWebView 封装、暗黑底色及鉴权脚本注入
 ├── Resources/
-│   ├── AppIcon.icns              # 高清 App 图标
+│   ├── AppIcon.icns              # macOS 原生高清 App 图标
+│   ├── AppIcon.png               # README 网页展示图标
 │   └── Info.plist                # 应用配置清单
 ├── scripts/
 │   ├── build.sh                  # 自动化编译脚本
