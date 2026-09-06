@@ -177,12 +177,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         refreshButton()
     }
 
-    /// 把 App 图标缩到菜单栏尺寸（16pt），彩色非模板
+    /// 把 App 图标画进菜单栏。macOS 图标画布自带约 10% 留白（圆角矩形约占 80%），
+    /// 直接等比缩到 16pt 会显得特别小：这里放大到 18pt 并超绘 ~1.2 倍裁掉画布留白，
+    /// 让可见图形接近菜单栏满高。
     private static func makeMenuBarIcon() -> NSImage? {
         guard let appIcon = NSApp.applicationIconImage else { return nil }
-        let target = NSSize(width: 16, height: 16)
-        let image = NSImage(size: target, flipped: false) { rect in
-            appIcon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        let side: CGFloat = 18
+        let zoom: CGFloat = 1.2
+        let inset = -(side * zoom - side) / 2
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            appIcon.draw(in: rect.insetBy(dx: inset, dy: inset), from: .zero, operation: .sourceOver, fraction: 1.0)
             return true
         }
         image.isTemplate = false
