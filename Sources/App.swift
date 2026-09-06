@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import Combine
+import UserNotifications
 
 @main
 struct KimiCodeApp: App {
@@ -29,6 +31,10 @@ struct KimiCodeApp: App {
                     KimiServiceManager.shared.fetchUsage()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+
+                Button("在终端打开 tmux") {
+                    KimiServiceManager.shared.openInTerminal()
+                }
             }
         }
     }
@@ -93,6 +99,17 @@ struct WindowAccessor: NSViewRepresentable {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 内嵌 Web UI 固定深色，窗口外观锁死深色保持上下统一
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // 本地通知（配额预警 / 任务完成提醒）
+        AppNotifications.requestAuthorization()
+
+        // 菜单栏常驻用量图标
+        MenuBarController.shared.install()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false
     }
@@ -122,5 +139,131 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         KimiServiceManager.shared.stopUsagePolling()
+    }
+}
+
+// MARK: - 菜单栏常驻图标
+// App 的核心定位是「窗口藏起来、服务继续跑」，菜单栏是窗口隐藏后的常驻入口：
+// 图标显示用量百分比（阈值着色），菜单提供唤起窗口、重载、重启、终端 attach 等快捷操作。
+
+final class MenuBarController: NSObject, NSMenuDelegate {
+    static let shared = MenuBarController()
+
+    private var statusItem: NSStatusItem?
+    private var cancellables = Set<AnyCancellable>()
+
+    private let manager = KimiServiceManager.shared
+
+    func install() {
+        guard statusItem == nil else { return }
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+
+        // 订阅状态与用量变化，实时刷新图标
+        manager.$weeklyUsage
+            .combineLatest(manager.$shortTermUsage, manager.$state)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _, _ in self?.refreshButton() }
+            .store(in: &cancellables)
+
+        refreshButton()
+    }
+
+    private func refreshButton() {
+        guard let button = statusItem?.button else { return }
+
+        let color: NSColor
+        let text: String
+
+        switch manager.state {
+        case .ready:
+            if let pct = manager.shortTermUsage?.percentage ?? manager.weeklyUsage?.percentage {
+                color = pct >= 90 ? .systemRed : (pct >= 70 ? .systemOrange : .systemGreen)
+                text = "\(pct)%"
+            } else {
+                color = .secondaryLabelColor
+                text = "Kimi"
+            }
+        case .error:
+            color = .systemRed
+            text = "Kimi"
+        case .checking, .starting:
+            color = .systemOrange
+            text = "…"
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: color,
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        ]
+        button.attributedTitle = NSAttributedString(string: "● \(text)", attributes: attributes)
+        button.toolTip = "Kimi Code 用量与服务状态"
+    }
+
+    // 打开菜单时重建条目，保证用量/状态是最新的
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        switch manager.state {
+        case .ready:
+            let version = manager.serverVersion.map { " · v\($0)" } ?? ""
+            menu.addItem(makeInfoItem("服务运行中\(version)"))
+        case .error:
+            menu.addItem(makeInfoItem("服务未响应"))
+        case .checking, .starting:
+            menu.addItem(makeInfoItem("服务启动中..."))
+        }
+
+        if let weekly = manager.weeklyUsage {
+            menu.addItem(makeInfoItem("周限额 \(weekly.percentage)% · \(weekly.resetRemainingText ?? "—")"))
+        }
+        if let short = manager.shortTermUsage {
+            menu.addItem(makeInfoItem("5小时限额 \(short.percentage)% · \(short.resetRemainingText ?? "—")"))
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem("打开 Kimi Code", #selector(openMainWindow)))
+        menu.addItem(makeActionItem("重新载入页面", #selector(reloadPage)))
+        menu.addItem(makeActionItem("重启后台服务", #selector(restartService)))
+        menu.addItem(makeActionItem("在终端打开 tmux", #selector(attachTerminal)))
+        menu.addItem(.separator())
+        menu.addItem(makeActionItem("退出 Kimi Code", #selector(NSApplication.terminate(_:))))
+    }
+
+    private func makeInfoItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        return item
+    }
+
+    private func makeActionItem(_ title: String, _ action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        for window in NSApp.windows where window.canBecomeKey {
+            window.makeKeyAndOrderFront(nil)
+        }
+        manager.startUsagePolling()
+    }
+
+    @objc private func reloadPage() {
+        manager.webReloadID = UUID()
+        manager.fetchUsage()
+    }
+
+    @objc private func restartService() {
+        openMainWindow()
+        manager.restartService()
+    }
+
+    @objc private func attachTerminal() {
+        manager.openInTerminal()
     }
 }

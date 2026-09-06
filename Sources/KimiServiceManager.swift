@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import UserNotifications
 
 public enum ServiceState: Equatable {
     case checking
@@ -74,14 +75,30 @@ public class KimiServiceManager: ObservableObject {
     // 套餐用量状态
     @Published public var weeklyUsage: PlanUsageLimit? = nil
     @Published public var shortTermUsage: PlanUsageLimit? = nil
+    /// 用量历史采样（百分比），用于弹层迷你走势图
+    @Published public var weeklyHistory: [Int] = []
+    @Published public var shortHistory: [Int] = []
+
+    // 最近工作目录（最多 5 个）
+    @Published public var recentDirs: [String] = []
+
+    /// Web UI 资源自愈失败（错误页据此展示「一键修复」按钮）
+    @Published public var webUIRepairFailed: Bool = false
 
     private let workDirKey = "KimiWebWorkDir"
     private let portKey = "KimiWebPort"
+    private let recentDirsKey = "KimiRecentDirs"
     private var isPolling = false
     private var usageTimer: Timer? = nil
     private var autoRetryTimer: Timer? = nil
     /// 本轮检测内是否已尝试过 Web UI 自动修复（避免循环 kill 服务）
     private var webUIRepairAttempted = false
+
+    // 配额预警去重状态（进程内即可，重置检测靠百分比大幅回落）
+    private var lastWeeklyPct: Int? = nil
+    private var lastShortPct: Int? = nil
+    private var weeklyNotifiedLevel = 0
+    private var shortNotifiedLevel = 0
 
     public static let shared = KimiServiceManager()
 
@@ -106,7 +123,26 @@ public class KimiServiceManager: ObservableObject {
         if savedPort > 0 {
             self.port = savedPort
         }
+
+        self.recentDirs = UserDefaults.standard.stringArray(forKey: recentDirsKey) ?? []
     }
+
+    // MARK: - 最近工作目录
+
+    private func touchRecentDir(_ path: String) {
+        var dirs = recentDirs.filter { $0 != path }
+        dirs.insert(path, at: 0)
+        recentDirs = Array(dirs.prefix(5))
+        UserDefaults.standard.set(recentDirs, forKey: recentDirsKey)
+    }
+
+    public func updateWorkDir(_ newPath: String) {
+        self.workDir = newPath
+        UserDefaults.standard.set(newPath, forKey: workDirKey)
+        touchRecentDir(newPath)
+    }
+
+    // MARK: - Token 与 URL
 
     public func fetchServerToken() -> String? {
         let tokenPath = ("~/.kimi-code/server.token" as NSString).expandingTildeInPath
@@ -147,6 +183,8 @@ public class KimiServiceManager: ObservableObject {
         return URL(string: "http://127.0.0.1:\(port)/")!
     }
 
+    // MARK: - 服务生命周期
+
     public func checkAndStartService(force: Bool = false) {
         if state == .ready && !force {
             return
@@ -169,6 +207,7 @@ public class KimiServiceManager: ObservableObject {
                         DispatchQueue.main.async {
                             self.stopAutoRetry()
                             self.state = .ready
+                            self.webUIRepairFailed = false
                             self.startUsagePolling()
                         }
                     } else {
@@ -198,6 +237,7 @@ public class KimiServiceManager: ObservableObject {
         if let dir = newWorkDir {
             self.workDir = dir
             UserDefaults.standard.set(dir, forKey: workDirKey)
+            touchRecentDir(dir)
         }
 
         self.state = .starting("正在重启 Kimi 服务...")
@@ -219,12 +259,14 @@ public class KimiServiceManager: ObservableObject {
         if webUIRepairAttempted {
             let message = """
             后端 API 正常，但 Web UI 资源加载失败（kimi 缓存损坏，疑似上游 bug）。\
-            自动重启未能恢复。请手动执行后点击"重新连接"：
+            自动重启未能恢复。可点击「一键修复」清理缓存重建资源，\
+            或手动执行后点击「重新连接」：
 
             rm -rf ~/Library/Caches/kimi-code/web
             """
             DispatchQueue.main.async {
                 self.state = .error(message)
+                self.webUIRepairFailed = true
                 self.startAutoRetry()
             }
         } else {
@@ -243,6 +285,23 @@ public class KimiServiceManager: ObservableObject {
         }
     }
 
+    /// 手动一键修复：kill 服务 → 清理 SPA 缓存 → 重新拉起并等待就绪。
+    /// 仅清理 kimi-code 自身的 Web UI 缓存目录。
+    public func forceRepairWebUI() {
+        guard !isPolling else { return }
+        state = .starting("正在清理缓存并重建 Web UI 资源...")
+        stopAutoRetry()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            self.killTmuxSession()
+            let cachePath = ("~/Library/Caches/kimi-code/web" as NSString).expandingTildeInPath
+            try? FileManager.default.removeItem(atPath: cachePath)
+            self.waitForPortRelease()
+            self.launchTmuxSession()
+            self.startPollingUntilReady(maxAttempts: 40)
+        }
+    }
+
     /// 等待端口释放，避免旧进程未退净时新进程绑定失败
     private func waitForPortRelease(timeout: TimeInterval = 3.0) {
         let start = Date()
@@ -250,6 +309,28 @@ public class KimiServiceManager: ObservableObject {
             let (code, _) = Self.runShell("lsof -ti tcp:\(port) 2>/dev/null | grep -q .")
             if code != 0 { return }
             Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+
+    // MARK: - 环境体检
+
+    /// 检查 kimi CLI 与 tmux 是否可用，缺失时返回可直接展示的指引文案；齐全返回 nil。
+    public func diagnoseMissingDependencies() -> String? {
+        let envPrefix = buildEnvPrefix()
+        let kimiRes = Self.runShell("\(envPrefix) command -v kimi 2>/dev/null")
+        let tmuxRes = Self.runShell("\(envPrefix) command -v tmux 2>/dev/null")
+        let kimiMissing = kimiRes.exitCode != 0 || kimiRes.output.isEmpty
+        let tmuxMissing = tmuxRes.exitCode != 0 || tmuxRes.output.isEmpty
+
+        switch (kimiMissing, tmuxMissing) {
+        case (false, false):
+            return nil
+        case (true, false):
+            return "未检测到 kimi CLI。安装与配置请参考：\nhttps://github.com/MoonshotAI/kimi-code"
+        case (false, true):
+            return "未检测到 tmux。请执行安装：\nbrew install tmux"
+        case (true, true):
+            return "未检测到 kimi CLI 与 tmux。\n  tmux：brew install tmux\n  kimi CLI：https://github.com/MoonshotAI/kimi-code"
         }
     }
 
@@ -289,11 +370,6 @@ public class KimiServiceManager: ObservableObject {
         }
     }
 
-    public func updateWorkDir(_ newPath: String) {
-        self.workDir = newPath
-        UserDefaults.standard.set(newPath, forKey: workDirKey)
-    }
-
     private func startPollingUntilReady(maxAttempts: Int = 25) {
         isPolling = true
         var attempts = 0
@@ -310,6 +386,7 @@ public class KimiServiceManager: ObservableObject {
                             DispatchQueue.main.async {
                                 self.stopAutoRetry()
                                 self.state = .ready
+                                self.webUIRepairFailed = false
                                 self.webReloadID = UUID()
                                 self.startUsagePolling()
                             }
@@ -322,7 +399,13 @@ public class KimiServiceManager: ObservableObject {
                     if attempts >= maxAttempts {
                         self.isPolling = false
                         DispatchQueue.main.async {
-                            self.state = .error("Kimi 服务启动响应超时。请确认已安装 kimi CLI（kimi --version）且 tmux 可用。")
+                            let message: String
+                            if let missing = self.diagnoseMissingDependencies() {
+                                message = "Kimi 服务启动超时。\n\n\(missing)"
+                            } else {
+                                message = "Kimi 服务启动响应超时（kimi CLI 与 tmux 均已就绪）。请点击「重新连接」重试。"
+                            }
+                            self.state = .error(message)
                             self.startAutoRetry()
                         }
                     } else {
@@ -336,6 +419,8 @@ public class KimiServiceManager: ObservableObject {
 
         poll()
     }
+
+    // MARK: - 用量轮询与配额预警
 
     public func startUsagePolling() {
         fetchUsage()
@@ -367,11 +452,53 @@ public class KimiServiceManager: ObservableObject {
             guard let data = data,
                   let res = try? JSONDecoder().decode(PlanUsageResponse.self, from: data),
                   let usageData = res.data else { return }
+            let weekly = usageData.summary
+            let short = usageData.limits?.first(where: { $0.window?.unit == "hour" })
             DispatchQueue.main.async {
-                self?.weeklyUsage = usageData.summary
-                self?.shortTermUsage = usageData.limits?.first(where: { $0.window?.unit == "hour" })
+                guard let self = self else { return }
+                self.weeklyUsage = weekly
+                self.shortTermUsage = short
+                self.recordHistory(weeklyPct: weekly?.percentage, shortPct: short?.percentage)
+                self.evaluateQuotaNotifications(weeklyPct: weekly?.percentage, shortPct: short?.percentage)
             }
         }.resume()
+    }
+
+    private func recordHistory(weeklyPct: Int?, shortPct: Int?) {
+        if let p = weeklyPct {
+            weeklyHistory.append(p)
+            if weeklyHistory.count > 120 { weeklyHistory.removeFirst(weeklyHistory.count - 120) }
+        }
+        if let p = shortPct {
+            shortHistory.append(p)
+            if shortHistory.count > 120 { shortHistory.removeFirst(shortHistory.count - 120) }
+        }
+    }
+
+    /// 阈值跨越（80% / 95%）与重置（百分比大幅回落）时发本地通知
+    private func evaluateQuotaNotifications(weeklyPct: Int?, shortPct: Int?) {
+        if let p = weeklyPct {
+            checkQuotaThreshold(name: "周限额", pct: p, last: &lastWeeklyPct, level: &weeklyNotifiedLevel)
+        }
+        if let p = shortPct {
+            checkQuotaThreshold(name: "5小时限额", pct: p, last: &lastShortPct, level: &shortNotifiedLevel)
+        }
+    }
+
+    private func checkQuotaThreshold(name: String, pct: Int, last: inout Int?, level: inout Int) {
+        // 百分比大幅回落视为窗口重置，重新武装阈值并提示配额恢复
+        if let prev = last, prev >= 30, pct <= prev - 25 {
+            level = 0
+            AppNotifications.post(title: "\(name)已重置", body: "配额已恢复，当前用量 \(pct)%")
+        }
+        if pct >= 95 && level < 95 {
+            level = 95
+            AppNotifications.post(title: "\(name)已达 95%", body: "配额即将耗尽（当前 \(pct)%），注意节奏")
+        } else if pct >= 80 && level < 80 {
+            level = 80
+            AppNotifications.post(title: "\(name)已用 80%", body: "当前用量 \(pct)%")
+        }
+        last = pct
     }
 
     public func fetchMetaVersion() {

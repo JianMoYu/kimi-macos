@@ -20,7 +20,50 @@ public struct KimiWebView: NSViewRepresentable {
 
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences = preferences
+        #if DEBUG
+        // 仅调试构建开放 Inspect Element，生产包不暴露
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        #endif
+
+        // 注册页面 → 原生的通知桥（须在创建 WebView 前注册）
+        config.userContentController.add(context.coordinator, name: "kimiNotify")
+
+        // 页面 Notification API shim：kimi web 任务完成时若调用 Notification，
+        // 自动授予权限并转发给原生本地通知（窗口隐藏后也能收到提醒）。
+        let notificationShim = """
+        (function() {
+            try {
+                if (!window.webkit || !window.webkit.messageHandlers || !window.webkit.messageHandlers.kimiNotify) return;
+                function ShimNotification(title, options) {
+                    options = options || {};
+                    this.title = title;
+                    this.body = options.body || '';
+                    this.tag = options.tag || '';
+                    try {
+                        window.webkit.messageHandlers.kimiNotify.postMessage(JSON.stringify({
+                            title: String(title || 'Kimi Code'),
+                            body: String(this.body)
+                        }));
+                    } catch (e) {}
+                }
+                ShimNotification.prototype.close = function() {};
+                ShimNotification.prototype.addEventListener = function() {};
+                ShimNotification.prototype.removeEventListener = function() {};
+                ShimNotification.prototype.dispatchEvent = function() { return false; };
+                ShimNotification.permission = 'granted';
+                ShimNotification.maxActions = 0;
+                ShimNotification.requestPermission = function(callback) {
+                    if (typeof callback === 'function') {
+                        setTimeout(function() { callback('granted'); }, 0);
+                    }
+                    return Promise.resolve('granted');
+                };
+                window.Notification = ShimNotification;
+            } catch (e) {}
+        })();
+        """
+        let shimScript = WKUserScript(source: notificationShim, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.addUserScript(shimScript)
 
         // 注入自动鉴权脚本
         if let token = KimiServiceManager.shared.fetchServerToken(), !token.isEmpty {
@@ -101,7 +144,7 @@ public struct KimiWebView: NSViewRepresentable {
         }
     }
 
-    public class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    public class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: KimiWebView
         weak var webView: WKWebView?
         var lastReloadID: UUID?
@@ -109,6 +152,62 @@ public struct KimiWebView: NSViewRepresentable {
         init(_ parent: KimiWebView) {
             self.parent = parent
             self.lastReloadID = parent.reloadTrigger
+        }
+
+        // MARK: - 导航策略：外链一律交给系统浏览器，避免把整个 App 导航走
+
+        public func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url, let host = url.host else {
+                decisionHandler(.allow)
+                return
+            }
+            let isLocal = host == "127.0.0.1" || host == "localhost"
+            let isUserLink = navigationAction.navigationType == .linkActivated
+            if !isLocal && (isUserLink || navigationAction.targetFrame == nil) {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        // MARK: - target="_blank" / window.open：本机链接在当前 WebView 加载，外链走系统浏览器
+
+        public func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            guard let url = navigationAction.request.url else { return nil }
+            if let host = url.host, host != "127.0.0.1" && host != "localhost" {
+                NSWorkspace.shared.open(url)
+            } else {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
+        }
+
+        // MARK: - 页面通知桥
+
+        public func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "kimiNotify" else { return }
+            var title = "Kimi Code"
+            var body = ""
+            if let raw = message.body as? String,
+               let data = raw.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let t = obj["title"] as? String, !t.isEmpty { title = t }
+                if let b = obj["body"] as? String { body = b }
+            }
+            AppNotifications.post(title: title, body: body)
         }
 
         public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

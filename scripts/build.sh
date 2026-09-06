@@ -27,6 +27,7 @@ swiftc -O \
     -framework AppKit \
     -framework WebKit \
     "${ROOT_DIR}/Sources/KimiServiceManager.swift" \
+    "${ROOT_DIR}/Sources/Notifications.swift" \
     "${ROOT_DIR}/Sources/WebView.swift" \
     "${ROOT_DIR}/Sources/ContentView.swift" \
     "${ROOT_DIR}/Sources/App.swift" \

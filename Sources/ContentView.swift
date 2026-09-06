@@ -7,6 +7,8 @@ public struct ContentView: View {
     @State private var pendingNewDir: String? = nil
     @State private var showChangeDirAlert = false
     @State private var showRestartConfirm = false
+    @State private var showUsagePopover = false
+    @State private var fixCommandCopied = false
 
     public init() {}
 
@@ -16,30 +18,34 @@ public struct ContentView: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            // 顶部工具栏（显示工作目录、用量监控、状态控制）
-            headerToolbar
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color(NSColor.windowBackgroundColor))
-
-            Divider()
-
-            // 主展示区域
-            ZStack {
-                switch manager.state {
-                case .ready:
-                    KimiWebView(url: manager.serviceURL, reloadTrigger: $manager.webReloadID)
-                        .edgesIgnoringSafeArea(.all)
-                case .checking:
-                    loadingView(title: "正在检查服务状态...", subtitle: "正在探测 http://127.0.0.1:\(manager.port)/")
-                case .starting(let message):
-                    loadingView(title: message, subtitle: "工作目录: \(manager.workDir)")
-                case .error(let message):
-                    errorView(message: message)
-                }
+        ZStack {
+            switch manager.state {
+            case .ready:
+                KimiWebView(url: manager.serviceURL, reloadTrigger: $manager.webReloadID)
+                    .edgesIgnoringSafeArea(.all)
+            case .checking:
+                loadingView(title: "正在检查服务状态...", subtitle: "正在探测 http://127.0.0.1:\(manager.port)/")
+            case .starting(let message):
+                loadingView(title: message, subtitle: "工作目录: \(manager.workDir)")
+            case .error(let message):
+                errorView(message: message)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                workDirMenu
+            }
+            ToolbarItem(placement: .principal) {
+                usagePill
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                statusIndicator
+                moreMenu
+            }
+        }
+        .popover(isPresented: $showUsagePopover, arrowEdge: .bottom) {
+            UsagePopoverView(manager: manager)
         }
         .onAppear {
             manager.checkAndStartService()
@@ -65,151 +71,107 @@ public struct ContentView: View {
         }
     }
 
-    // MARK: - 顶部工具栏
-    private var headerToolbar: some View {
-        HStack(spacing: 12) {
-            // 左侧：当前工作目录与切换按钮
-            HStack(spacing: 6) {
-                Image(systemName: "folder.fill")
-                    .foregroundColor(.accentColor)
-                    .imageScale(.medium)
+    // MARK: - 工作目录菜单（含最近目录）
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(currentFolderName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    Text(manager.workDir)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .help(manager.workDir)
-
-                Button(action: selectNewDirectory) {
-                    Label("更改目录", systemImage: "arrow.triangle.swap")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("选择新的工作目录")
-
-                Button(action: {
-                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: manager.workDir)
-                }) {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.borderless)
-                .help("在访达中打开当前目录")
+    private var workDirMenu: some View {
+        Menu {
+            Section {
+                Text(manager.workDir)
+                    .font(.system(size: 10))
             }
-
-            Spacer()
-
-            // 中间：直接显示套餐用量看板
-            usageBannerView
-
-            Spacer()
-
-            // 右侧：状态指示与控制操作
-            HStack(spacing: 8) {
-                statusIndicator
-
-                Button(action: { showRestartConfirm = true }) {
-                    Label("重启服务", systemImage: "arrow.clockwise.circle")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("重启后台服务（更新 Kimi Code 后点击生效）")
-
-                Button(action: {
-                    manager.webReloadID = UUID()
-                    manager.fetchUsage()
-                }) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .keyboardShortcut("r", modifiers: [.command])
-                .help("刷新页面与用量 (Cmd+R)")
-            }
-        }
-    }
-
-    // MARK: - 套餐用量直接展示组件
-    @ViewBuilder
-    private var usageBannerView: some View {
-        if let weekly = manager.weeklyUsage {
-            HStack(spacing: 10) {
-                // 每周用量
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(usageColor(percentage: weekly.percentage))
-                        .frame(width: 7, height: 7)
-
-                    Text("周用量: \(weekly.percentage)%")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(usageColor(percentage: weekly.percentage))
-
-                    if let reset = weekly.resetRemainingText {
-                        Text("(\(reset))")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .help("每周限额：已使用 \(weekly.used)/\(weekly.limit) (\(weekly.percentage)%)\n重置时间：\(weekly.resetRemainingText ?? "暂无")")
-
-                // 分隔竖线
-                if let short = manager.shortTermUsage {
-                    Divider()
-                        .frame(height: 12)
-
-                    // 5小时用量
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(usageColor(percentage: short.percentage))
-                            .frame(width: 7, height: 7)
-
-                        Text("5小时: \(short.percentage)%")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(usageColor(percentage: short.percentage))
-
-                        if let reset = short.resetRemainingText {
-                            Text("(\(reset))")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
+            if manager.recentDirs.filter({ $0 != manager.workDir }).isEmpty == false {
+                Section("最近使用") {
+                    ForEach(manager.recentDirs.filter { $0 != manager.workDir }, id: \.self) { dir in
+                        Button {
+                            pendingNewDir = dir
+                            showChangeDirAlert = true
+                        } label: {
+                            Text(URL(fileURLWithPath: dir).lastPathComponent)
                         }
                     }
-                    .help("5小时限额：已使用 \(short.used)/\(short.limit) (\(short.percentage)%)\n重置时间：\(short.resetRemainingText ?? "暂无")")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.85))
-            .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.secondary.opacity(0.18), lineWidth: 0.5)
-            )
-            .onTapGesture {
-                manager.fetchUsage()
+            Section {
+                Button {
+                    selectNewDirectory()
+                } label: {
+                    Label("选择其他目录...", systemImage: "folder.badge.plus")
+                }
+                Button {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: manager.workDir)
+                } label: {
+                    Label("在访达中打开", systemImage: "arrow.up.forward.app")
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "folder.fill")
+                    .foregroundColor(.accentColor)
+                Text(currentFolderName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .help(manager.workDir)
+    }
+
+    // MARK: - 用量胶囊条（迷你进度条版）
+
+    private var usagePill: some View {
+        Group {
+            if manager.weeklyUsage != nil || manager.shortTermUsage != nil {
+                HStack(spacing: 8) {
+                    UsageMiniBar(title: "周用量", usage: manager.weeklyUsage)
+                    if manager.shortTermUsage != nil {
+                        Divider()
+                            .frame(height: 12)
+                        UsageMiniBar(title: "5小时", usage: manager.shortTermUsage)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
+                .contentShape(Capsule())
+                .onTapGesture {
+                    manager.fetchUsage()
+                    showUsagePopover = true
+                }
+                .help("点击查看用量详情")
+            } else {
+                Text("用量加载中...")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
         }
     }
 
-    private func usageColor(percentage: Int) -> Color {
-        if percentage >= 90 {
-            return .red
-        } else if percentage >= 70 {
-            return .orange
-        } else {
-            return .green
+    // MARK: - 「⋯」菜单（收纳低频操作）
+
+    private var moreMenu: some View {
+        Menu {
+            Button {
+                showRestartConfirm = true
+            } label: {
+                Label("重启后台服务...", systemImage: "arrow.clockwise.circle")
+            }
+            Button {
+                manager.openInTerminal()
+            } label: {
+                Label("在终端打开 tmux", systemImage: "terminal")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
+        .help("更多操作")
     }
 
     // MARK: - 状态指示器
+
     private var statusIndicator: some View {
         HStack(spacing: 6) {
             switch manager.state {
@@ -221,33 +183,20 @@ public struct ContentView: View {
                     Text("v\(ver)")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                } else {
-                    Text("运行中")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
                 }
             case .starting, .checking:
                 ProgressView()
                     .controlSize(.mini)
-                Text("启动中...")
-                    .font(.system(size: 11))
-                    .foregroundColor(.orange)
             case .error:
                 Circle()
                     .fill(Color.red)
                     .frame(width: 8, height: 8)
-                Text("连接失败")
-                    .font(.system(size: 11))
-                    .foregroundColor(.red)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        .cornerRadius(12)
     }
 
     // MARK: - 加载过渡界面
+
     private func loadingView(title: String, subtitle: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "sparkles.rectangle.stack")
@@ -272,10 +221,11 @@ public struct ContentView: View {
                 .padding(.horizontal, 40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - 错误异常界面
+
     private func errorView(message: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -289,7 +239,8 @@ public struct ContentView: View {
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
+                .textSelection(.enabled)
+                .frame(maxWidth: 480)
 
             if manager.autoRetryActive {
                 HStack(spacing: 6) {
@@ -307,6 +258,27 @@ public struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
+                if manager.webUIRepairFailed {
+                    Button("一键修复（清理缓存重建）") {
+                        manager.forceRepairWebUI()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Button {
+                    let cmd = "rm -rf ~/Library/Caches/kimi-code/web\ntmux kill-session -t kimi-web"
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cmd, forType: .string)
+                    fixCommandCopied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        fixCommandCopied = false
+                    }
+                } label: {
+                    Label(fixCommandCopied ? "已复制" : "复制修复命令",
+                          systemImage: fixCommandCopied ? "checkmark" : "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+
                 Button("更改工作目录") {
                     selectNewDirectory()
                 }
@@ -315,10 +287,11 @@ public struct ContentView: View {
             .padding(.top, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     // MARK: - 弹出系统文件夹选择框
+
     private func selectNewDirectory() {
         let panel = NSOpenPanel()
         panel.title = "选择 Kimi Code 工作目录"
@@ -335,6 +308,184 @@ public struct ContentView: View {
             if path != manager.workDir {
                 self.pendingNewDir = path
                 self.showChangeDirAlert = true
+            }
+        }
+    }
+}
+
+// MARK: - 迷你进度条（工具栏用量胶囊）
+
+struct UsageMiniBar: View {
+    let title: String
+    let usage: PlanUsageLimit?
+
+    private var barColor: Color {
+        guard let usage = usage else { return .secondary }
+        return usageColor(percentage: usage.percentage)
+    }
+
+    var body: some View {
+        if let usage = usage {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text("\(usage.percentage)%")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(barColor)
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.18))
+                        Capsule()
+                            .fill(barColor)
+                            .frame(width: geo.size.width * min(1.0, Double(usage.percentage) / 100.0))
+                    }
+                }
+                .frame(width: 46, height: 3)
+            }
+            .help("\(title)：已使用 \(usage.used)/\(usage.limit) (\(usage.percentage)%)\n\(usage.resetRemainingText ?? "")")
+        }
+    }
+}
+
+func usageColor(percentage: Int) -> Color {
+    if percentage >= 90 {
+        return .red
+    } else if percentage >= 70 {
+        return .orange
+    } else {
+        return .green
+    }
+}
+
+// MARK: - 用量详情弹层
+
+struct UsagePopoverView: View {
+    @ObservedObject var manager: KimiServiceManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let weekly = manager.weeklyUsage {
+                UsageDetailRow(
+                    title: "周限额",
+                    usage: weekly,
+                    history: manager.weeklyHistory
+                )
+            }
+            if manager.weeklyUsage != nil && manager.shortTermUsage != nil {
+                Divider()
+            }
+            if let short = manager.shortTermUsage {
+                UsageDetailRow(
+                    title: "5 小时限额",
+                    usage: short,
+                    history: manager.shortHistory
+                )
+            }
+            if manager.weeklyUsage == nil && manager.shortTermUsage == nil {
+                Text("暂无用量数据")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Button {
+                    manager.fetchUsage()
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                Button {
+                    manager.openInTerminal()
+                } label: {
+                    Label("在终端打开", systemImage: "terminal")
+                }
+                Spacer()
+                if let ver = manager.serverVersion {
+                    Text("v\(ver)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 300)
+    }
+}
+
+struct UsageDetailRow: View {
+    let title: String
+    let usage: PlanUsageLimit
+    let history: [Int]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("\(usage.percentage)%")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(usageColor(percentage: usage.percentage))
+            }
+
+            HStack(spacing: 4) {
+                Text("已用 \(usage.used) / \(usage.limit)")
+                if let reset = usage.resetRemainingText {
+                    Text("·")
+                    Text(reset)
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.15))
+                    Capsule()
+                        .fill(usageColor(percentage: usage.percentage))
+                        .frame(width: geo.size.width * min(1.0, Double(usage.percentage) / 100.0))
+                }
+            }
+            .frame(height: 4)
+
+            UsageSparkline(values: history, color: usageColor(percentage: usage.percentage))
+                .frame(height: 28)
+        }
+    }
+}
+
+// MARK: - 用量走势迷你图
+
+struct UsageSparkline: View {
+    let values: [Int]
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            if values.count >= 2 {
+                let width = geo.size.width
+                let height = geo.size.height
+                Path { path in
+                    for (index, value) in values.enumerated() {
+                        let x = width * CGFloat(index) / CGFloat(values.count - 1)
+                        let clamped = min(100, max(0, value))
+                        let y = height * (1.0 - CGFloat(clamped) / 100.0)
+                        if index == 0 {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            path.addLine(to: CGPoint(x: x, y: y))
+                        }
+                    }
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            } else {
+                Text("走势采集中...")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
             }
         }
     }
