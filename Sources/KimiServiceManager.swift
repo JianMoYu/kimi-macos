@@ -68,6 +68,8 @@ public class KimiServiceManager: ObservableObject {
     @Published public var sessionName: String = "kimi-web"
     @Published public var webReloadID: UUID = UUID()
     @Published public var serverVersion: String? = nil
+    /// error 状态下是否正在自动重试（供 UI 展示）
+    @Published public var autoRetryActive: Bool = false
 
     // 套餐用量状态
     @Published public var weeklyUsage: PlanUsageLimit? = nil
@@ -77,6 +79,9 @@ public class KimiServiceManager: ObservableObject {
     private let portKey = "KimiWebPort"
     private var isPolling = false
     private var usageTimer: Timer? = nil
+    private var autoRetryTimer: Timer? = nil
+    /// 本轮检测内是否已尝试过 Web UI 自动修复（避免循环 kill 服务）
+    private var webUIRepairAttempted = false
 
     public static let shared = KimiServiceManager()
 
@@ -147,14 +152,28 @@ public class KimiServiceManager: ObservableObject {
             return
         }
         guard !isPolling else { return }
+        // 手动触发（无 force）视为新一轮检测，允许再次自动修复；
+        // 自动重试（force: true）不重置，避免循环 kill 服务。
+        if !force {
+            webUIRepairAttempted = false
+        }
         self.state = .checking
+        stopAutoRetry()
 
-        checkHttpHealth { [weak self] isAlive in
+        checkApiHealth { [weak self] apiAlive in
             guard let self = self else { return }
-            if isAlive {
-                DispatchQueue.main.async {
-                    self.state = .ready
-                    self.startUsagePolling()
+            if apiAlive {
+                // 后端就绪，还需确认内嵌 Web UI 资源可服务。
+                self.checkWebUIHealth { webAlive in
+                    if webAlive {
+                        DispatchQueue.main.async {
+                            self.stopAutoRetry()
+                            self.state = .ready
+                            self.startUsagePolling()
+                        }
+                    } else {
+                        self.handleWebUIAssetsBroken()
+                    }
                 }
             } else {
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -182,12 +201,78 @@ public class KimiServiceManager: ObservableObject {
         }
 
         self.state = .starting("正在重启 Kimi 服务...")
+        stopAutoRetry()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             self.killTmuxSession()
-            Thread.sleep(forTimeInterval: 0.5)
+            self.waitForPortRelease()
             self.launchTmuxSession()
             self.startPollingUntilReady()
+        }
+    }
+
+    // MARK: - Web UI 资源自愈
+
+    /// API 就绪但 SPA 静态资源 404（上游 kimi bundle 解压失败的典型症状）。
+    /// 重启 kimi web 会重新解压资源到 ~/Library/Caches/kimi-code/web/，实测可修复。
+    private func handleWebUIAssetsBroken() {
+        if webUIRepairAttempted {
+            let message = """
+            后端 API 正常，但 Web UI 资源加载失败（kimi 缓存损坏，疑似上游 bug）。\
+            自动重启未能恢复。请手动执行后点击"重新连接"：
+
+            rm -rf ~/Library/Caches/kimi-code/web
+            """
+            DispatchQueue.main.async {
+                self.state = .error(message)
+                self.startAutoRetry()
+            }
+        } else {
+            webUIRepairAttempted = true
+            DispatchQueue.main.async {
+                self.state = .starting("Web UI 资源异常，正在自动修复（重启服务重建资源）...")
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                self.killTmuxSession()
+                self.waitForPortRelease()
+                self.launchTmuxSession()
+                // 修复模式下 kimi 冷启动，放宽轮询预算
+                self.startPollingUntilReady(maxAttempts: 40)
+            }
+        }
+    }
+
+    /// 等待端口释放，避免旧进程未退净时新进程绑定失败
+    private func waitForPortRelease(timeout: TimeInterval = 3.0) {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            let (code, _) = Self.runShell("lsof -ti tcp:\(port) 2>/dev/null | grep -q .")
+            if code != 0 { return }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+    }
+
+    // MARK: - 错误状态自动重试
+
+    /// error 状态下每 10 秒自动重试，服务中途恢复（如用户在终端手动拉起）可自愈
+    private func startAutoRetry() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.autoRetryTimer?.invalidate()
+            self.autoRetryActive = true
+            self.autoRetryTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+                self?.checkAndStartService(force: true)
+            }
+        }
+    }
+
+    private func stopAutoRetry() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.autoRetryTimer?.invalidate()
+            self.autoRetryTimer = nil
+            self.autoRetryActive = false
         }
     }
 
@@ -209,28 +294,36 @@ public class KimiServiceManager: ObservableObject {
         UserDefaults.standard.set(newPath, forKey: workDirKey)
     }
 
-    private func startPollingUntilReady() {
+    private func startPollingUntilReady(maxAttempts: Int = 25) {
         isPolling = true
         var attempts = 0
-        let maxAttempts = 25
 
         func poll() {
             guard self.isPolling else { return }
-            self.checkHttpHealth { [weak self] isAlive in
+            self.checkApiHealth { [weak self] apiAlive in
                 guard let self = self else { return }
-                if isAlive {
+                if apiAlive {
                     self.isPolling = false
-                    DispatchQueue.main.async {
-                        self.state = .ready
-                        self.webReloadID = UUID()
-                        self.startUsagePolling()
+                    // 后端已就绪，再确认 Web UI 资源（SPA bundle）是否可服务。
+                    self.checkWebUIHealth { webAlive in
+                        if webAlive {
+                            DispatchQueue.main.async {
+                                self.stopAutoRetry()
+                                self.state = .ready
+                                self.webReloadID = UUID()
+                                self.startUsagePolling()
+                            }
+                        } else {
+                            self.handleWebUIAssetsBroken()
+                        }
                     }
                 } else {
                     attempts += 1
                     if attempts >= maxAttempts {
                         self.isPolling = false
                         DispatchQueue.main.async {
-                            self.state = .error("Kimi 服务启动响应超时。请检查服务配置。")
+                            self.state = .error("Kimi 服务启动响应超时。请确认已安装 kimi CLI（kimi --version）且 tmux 可用。")
+                            self.startAutoRetry()
                         }
                     } else {
                         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
@@ -294,8 +387,24 @@ public class KimiServiceManager: ObservableObject {
         }.resume()
     }
 
-    private func checkHttpHealth(completion: @escaping (Bool) -> Void) {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+    /// 后端 API 是否就绪。探测 /api/v1/meta —— 这是后端真实的健康信号。
+    /// 不要用 / 作为健康检查：上游 kimi 的 SPA bundle 解压失败时 / 返回 404，
+    /// 但 API 独立可用（2026-09 kimi 0.40.1 缓存损坏事故）。
+    private func checkApiHealth(completion: @escaping (Bool) -> Void) {
+        probeURL(path: "/api/v1/meta", completion: completion)
+    }
+
+    /// 内嵌 Web UI（SPA 静态资源）是否可服务。
+    private func checkWebUIHealth(completion: @escaping (Bool) -> Void) {
+        probeURL(path: "/", completion: completion)
+    }
+
+    private func probeURL(path: String, completion: @escaping (Bool) -> Void) {
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else {
+            completion(false)
+            return
+        }
+        var request = URLRequest(url: url)
         request.timeoutInterval = 1.0
         request.httpMethod = "GET"
 

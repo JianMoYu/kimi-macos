@@ -56,6 +56,29 @@ cd kimi-macos
 
 ---
 
+## 故障排查
+
+### 显示「服务暂未响应」
+
+App 健康检查分两级：先探测 `/api/v1/meta`（后端就绪信号），再探测 `/`（Web UI 资源）。
+
+- **后端超时**：确认 `kimi --version` 可用、`tmux` 已安装。App 会在错误页每 10 秒自动重试。
+- **后端正常但 Web UI 资源 404**：kimi CLI 的 SPA bundle 解压失败（上游缓存损坏，多见于 kimi 版本升级后）。App 会自动重启服务尝试重建资源一次；若未恢复，手动执行后点击「重新连接」：
+
+  ```bash
+  rm -rf ~/Library/Caches/kimi-code/web
+  tmux kill-session -t kimi-web   # 重启后 kimi web 会重新解压资源
+  ```
+
+### 手动重启后台服务
+
+```bash
+tmux kill-session -t kimi-web
+# 然后在 App 中点击「重启服务」或「重新连接」
+```
+
+---
+
 ## 开源协议
 
 [MIT License](LICENSE)

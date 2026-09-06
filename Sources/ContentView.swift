@@ -289,7 +289,17 @@ public struct ContentView: View {
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+                .frame(maxWidth: 460)
+
+            if manager.autoRetryActive {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("每 10 秒自动重试中，服务恢复后将自动连接")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
 
             HStack(spacing: 12) {
                 Button("重新连接") {
