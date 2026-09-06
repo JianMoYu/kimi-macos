@@ -11,6 +11,7 @@ public struct ContentView: View {
     @State private var showAgentInspector = false
     @State private var showTokenStatsPopover = false
     @State private var fixCommandCopied = false
+    @State private var showErrorDetails = false
 
     public init() {}
 
@@ -48,13 +49,21 @@ public struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                HStack(spacing: 6) {
-                    Image(systemName: "sparkles.rectangle.stack.fill")
-                        .foregroundColor(.accentColor)
-                        .font(.system(size: 13))
+                HStack(spacing: 7) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.accentColor.gradient)
+                            .frame(width: 22, height: 22)
+                        Image(systemName: "sparkles")
+                            .foregroundColor(.white)
+                            .font(.system(size: 10, weight: .bold))
+                    }
                     Text("Kimi Code")
                         .font(.system(size: 13, weight: .semibold))
                 }
+                .padding(.horizontal, 6)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Kimi Code")
             }
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 8) {
@@ -64,10 +73,10 @@ public struct ContentView: View {
                     }
                     usagePill
                 }
+                .padding(.horizontal, 14)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 tokenStatsPill
-                statusIndicator
                 moreMenu
             }
         }
@@ -98,29 +107,27 @@ public struct ContentView: View {
     private var usagePill: some View {
         Group {
             if manager.weeklyUsage != nil || manager.shortTermUsage != nil {
-                HStack(spacing: 8) {
-                    UsageMiniBar(title: "周用量", usage: manager.weeklyUsage)
-                    if manager.shortTermUsage != nil {
-                        Divider()
-                            .frame(height: 12)
-                        UsageMiniBar(title: "5小时", usage: manager.shortTermUsage)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
-                .contentShape(Capsule())
-                .onTapGesture {
+                Button {
                     manager.fetchUsage()
                     showUsagePopover = true
+                } label: {
+                    HStack(spacing: 8) {
+                        UsageMiniBar(title: "周", usage: manager.weeklyUsage)
+                        if manager.shortTermUsage != nil {
+                            Divider()
+                                .frame(height: 11)
+                            UsageMiniBar(title: "5小时", usage: manager.shortTermUsage)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                .help("点击查看周/5小时套餐用量详情")
+                .buttonStyle(.plain)
+                .help("查看套餐用量")
+                .accessibilityLabel("套餐用量")
             } else {
-                Text("用量加载中...")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                ProgressView()
+                    .controlSize(.mini)
+                    .help("正在加载套餐用量")
             }
         }
     }
@@ -128,57 +135,45 @@ public struct ContentView: View {
     // MARK: - 常驻 Token 统计胶囊（按会话 / 今日，常驻显示无需点击）
 
     private var tokenStatsPill: some View {
-        HStack(spacing: 7) {
-            // 会话 Token
-            HStack(spacing: 3.5) {
-                Circle()
-                    .fill(Color(red: 0.38, green: 0.30, blue: 0.95))
-                    .frame(width: 6.5, height: 6.5)
-                Text("会话")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text(formatTokenCount(telemetry.sessionStats.totalTokens))
-                    .font(.system(size: 11, weight: .semibold))
-                Text("🎯\(String(format: "%.1f%%", telemetry.sessionStats.cacheHitRate))")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(telemetry.sessionStats.cacheHitRate >= 80 ? .green : .secondary)
-            }
-
-            Divider()
-                .frame(height: 12)
-
-            // 今日 Token
-            HStack(spacing: 3.5) {
-                Circle()
-                    .fill(Color.orange)
-                    .frame(width: 6.5, height: 6.5)
-                Text("今日")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text(formatTokenCount(telemetry.todayStats.totalTokens))
-                    .font(.system(size: 11, weight: .semibold))
-                if telemetry.todayStats.totalTokens > 0 {
-                    Text("🎯\(String(format: "%.1f%%", telemetry.todayStats.cacheHitRate))")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(telemetry.todayStats.cacheHitRate >= 80 ? .green : .secondary)
-                }
-            }
-
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundColor(.secondary)
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
-        .contentShape(Capsule())
-        .onTapGesture {
+        Button {
             telemetry.recalculateCumulativeStats()
             showTokenStatsPopover = true
+        } label: {
+            HStack(spacing: 8) {
+                tokenSummary(title: "会话", count: telemetry.sessionStats.totalTokens, color: Color(red: 0.38, green: 0.30, blue: 0.95))
+
+                Divider()
+                    .frame(height: 11)
+
+                tokenSummary(title: "今日", count: telemetry.todayStats.totalTokens, color: .orange)
+
+                statusIndicator
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .contentShape(Rectangle())
         }
-        .help("Token 统计（常驻展示：按会话 / 今日）\n点击查看详细未缓存/缓存/输出统计卡片")
+        .buttonStyle(.plain)
+        .help("查看 Token 明细")
+        .accessibilityLabel("Token 统计")
+        .accessibilityValue("会话 \(formatTokenCount(telemetry.sessionStats.totalTokens))，今日 \(formatTokenCount(telemetry.todayStats.totalTokens))")
+    }
+
+    private func tokenSummary(title: String, count: Int, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Text(formatTokenCount(count))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+        }
     }
 
     // MARK: - 「⋯」菜单（收纳低频操作）
@@ -202,8 +197,13 @@ public struct ContentView: View {
             } label: {
                 Label("打开 Agent 监视面板", systemImage: "cpu")
             }
+            Divider()
+            if let version = manager.serverVersion {
+                Text("Kimi Code v\(version)")
+            }
         } label: {
             Image(systemName: "ellipsis.circle")
+                .padding(.horizontal, 8)
         }
         .help("更多操作")
     }
@@ -211,114 +211,177 @@ public struct ContentView: View {
     // MARK: - 状态指示器
 
     private var statusIndicator: some View {
-        HStack(spacing: 6) {
+        Group {
             switch manager.state {
             case .ready:
                 Circle()
                     .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                if let ver = manager.serverVersion {
-                    Text("v\(ver)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
+                    .frame(width: 7, height: 7)
             case .starting, .checking:
                 ProgressView()
                     .controlSize(.mini)
             case .error:
                 Circle()
                     .fill(Color.red)
-                    .frame(width: 8, height: 8)
+                    .frame(width: 7, height: 7)
             }
+        }
+        .help(statusHelpText)
+        .accessibilityLabel(statusHelpText)
+    }
+
+    private var statusHelpText: String {
+        switch manager.state {
+        case .ready:
+            return manager.serverVersion.map { "Kimi 服务已连接，版本 \($0)" } ?? "Kimi 服务已连接"
+        case .starting, .checking:
+            return "正在连接 Kimi 服务"
+        case .error:
+            return "Kimi 服务未连接"
         }
     }
 
     // MARK: - 加载过渡界面
 
     private func loadingView(title: String, subtitle: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 52))
-                .foregroundColor(.accentColor)
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.10))
+                    .frame(width: 86, height: 86)
+                Image(systemName: "sparkles.rectangle.stack.fill")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundColor(.accentColor)
+            }
 
-            Text("Kimi Code")
-                .font(.system(size: 22, weight: .bold))
+            VStack(spacing: 6) {
+                Text("Kimi Code")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                Text(title)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.primary)
+            }
 
             ProgressView()
-                .controlSize(.regular)
-                .padding(.top, 4)
-
-            Text(title)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.primary)
+                .controlSize(.small)
+                .frame(width: 160)
 
             Text(subtitle)
-                .font(.system(size: 12))
+                .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+                .lineLimit(2)
                 .padding(.horizontal, 40)
         }
+        .padding(36)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.08), radius: 24, y: 10)
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title)。\(subtitle)")
     }
 
     // MARK: - 错误异常界面
 
     private func errorView(message: String) -> some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-                .foregroundColor(.yellow)
-
-            Text("服务暂未响应")
-                .font(.system(size: 20, weight: .bold))
-
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .textSelection(.enabled)
-                .frame(maxWidth: 480)
-
-            if manager.autoRetryActive {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("每 10 秒自动重试中，服务恢复后将自动连接")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(0.12))
+                    .frame(width: 82, height: 82)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 34, weight: .medium))
+                    .foregroundColor(.orange)
             }
 
-            HStack(spacing: 12) {
+            VStack(spacing: 7) {
+                Text("服务暂未响应")
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                Text("Kimi Code 无法连接到本地服务，你可以先重新连接。")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+
+            if manager.autoRetryActive {
+                Label("正在自动重试，服务恢复后会立即连接", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 10) {
                 Button("重新连接") {
                     manager.checkAndStartService()
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
 
                 if manager.webUIRepairFailed {
-                    Button("一键修复（清理缓存重建）") {
+                    Button("一键修复") {
                         manager.forceRepairWebUI()
                     }
                     .buttonStyle(.bordered)
                 }
 
                 Button {
-                    let cmd = "rm -rf ~/Library/Caches/kimi-code/web\ntmux kill-session -t kimi-web"
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cmd, forType: .string)
-                    fixCommandCopied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        fixCommandCopied = false
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showErrorDetails.toggle()
                     }
                 } label: {
-                    Label(fixCommandCopied ? "已复制" : "复制修复命令",
-                          systemImage: fixCommandCopied ? "checkmark" : "doc.on.doc")
+                    Label(showErrorDetails ? "收起详情" : "查看详情", systemImage: showErrorDetails ? "chevron.up" : "chevron.down")
                 }
                 .buttonStyle(.bordered)
             }
-            .padding(.top, 8)
+
+            if showErrorDetails {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(message)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack {
+                        Text("端口 \(manager.port)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button {
+                            let cmd = "rm -rf ~/Library/Caches/kimi-code/web\ntmux kill-session -t kimi-web"
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(cmd, forType: .string)
+                            fixCommandCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                fixCommandCopied = false
+                            }
+                        } label: {
+                            Label(fixCommandCopied ? "已复制" : "复制修复命令",
+                                  systemImage: fixCommandCopied ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(12)
+                .frame(width: 480)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.65))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.secondary.opacity(0.12)))
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
+        .padding(36)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(0.08), radius: 24, y: 10)
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -335,65 +398,54 @@ struct AgentHUDCapsule: View {
     }
 
     var body: some View {
-        HStack(spacing: 7) {
-            if telemetry.isBusy {
-                Circle()
-                    .fill(Color.cyan)
-                    .frame(width: 7, height: 7)
+        Button(action: onTap) {
+            HStack(spacing: 7) {
+                if telemetry.isBusy {
+                    Circle()
+                        .fill(Color.cyan)
+                        .frame(width: 7, height: 7)
 
-                if telemetry.tokensPerSecond > 0 {
-                    Text("⚡️ \(Int(telemetry.tokensPerSecond)) tok/s")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.primary)
-                } else {
-                    Text("Agent 运行中")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.primary)
-                }
-
-                if activeSubAgentCount > 0 {
-                    Divider().frame(height: 10)
-                    HStack(spacing: 3) {
-                        Image(systemName: "person.2.fill")
-                            .font(.system(size: 9))
-                        Text("\(activeSubAgentCount)")
-                            .font(.system(size: 11, weight: .semibold))
+                    if telemetry.tokensPerSecond > 0 {
+                        Text("\(Int(telemetry.tokensPerSecond)) tok/s")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.primary)
+                    } else {
+                        Text("Agent 运行中")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.primary)
                     }
-                    .foregroundColor(.accentColor)
-                }
-            } else {
-                Image(systemName: "cpu")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
 
-                if telemetry.contextTokens > 0 {
-                    Text("Context \(formatTokenCount(telemetry.contextTokens))")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
+                    if activeSubAgentCount > 0 {
+                        Divider().frame(height: 10)
+                        HStack(spacing: 3) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 9))
+                            Text("\(activeSubAgentCount)")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundColor(.accentColor)
+                    }
                 } else {
-                    Text("Agent 就绪")
-                        .font(.system(size: 11, weight: .medium))
+                    Image(systemName: "cpu")
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
-                }
 
-                if telemetry.cacheHitRate > 0 {
-                    Divider().frame(height: 10)
-                    Text("🎯 \(Int(telemetry.cacheHitRate))% 缓存")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.green)
+                    if telemetry.contextTokens > 0 {
+                        Text("Context \(formatTokenCount(telemetry.contextTokens))")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Agent 就绪")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
-        .contentShape(Capsule())
-        .onTapGesture {
-            onTap()
-        }
-        .help("点击查看 Agent 状态、SubAgent 拓扑与 Token 性能")
+        .buttonStyle(.plain)
+        .help("查看 Agent 状态、SubAgent 与 Token 性能")
+        .accessibilityLabel(telemetry.isBusy ? "Agent 正在运行" : "Agent 已就绪")
     }
 }
 
@@ -877,8 +929,7 @@ struct UsagePopoverView: View {
             if let weekly = manager.weeklyUsage {
                 UsageDetailRow(
                     title: "周限额",
-                    usage: weekly,
-                    history: manager.weeklyHistory
+                    usage: weekly
                 )
             }
             if manager.weeklyUsage != nil && manager.shortTermUsage != nil {
@@ -887,8 +938,7 @@ struct UsagePopoverView: View {
             if let short = manager.shortTermUsage {
                 UsageDetailRow(
                     title: "5 小时限额",
-                    usage: short,
-                    history: manager.shortHistory
+                    usage: short
                 )
             }
             if manager.weeklyUsage == nil && manager.shortTermUsage == nil {
@@ -926,7 +976,6 @@ struct UsagePopoverView: View {
 struct UsageDetailRow: View {
     let title: String
     let usage: PlanUsageLimit
-    let history: [Int]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -959,57 +1008,6 @@ struct UsageDetailRow: View {
                 }
             }
             .frame(height: 3)
-
-            if history.count >= 10 {
-                Text("近期走势")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .padding(.top, 2)
-                UsageSparkline(values: history, color: usageColor(percentage: usage.percentage))
-                    .frame(height: 26)
-            }
-        }
-    }
-}
-
-// MARK: - 用量走势迷你图
-
-struct UsageSparkline: View {
-    let values: [Int]
-    let color: Color
-
-    var body: some View {
-        GeometryReader { geo in
-            if values.count >= 2 {
-                let width = geo.size.width
-                let height = geo.size.height
-                let points: [CGPoint] = values.enumerated().map { index, value in
-                    CGPoint(
-                        x: width * CGFloat(index) / CGFloat(values.count - 1),
-                        y: height * (1.0 - CGFloat(min(100, max(0, value))) / 100.0)
-                    )
-                }
-                ZStack {
-                    Path { path in
-                        path.move(to: points[0])
-                        points.dropFirst().forEach { path.addLine(to: $0) }
-                        path.addLine(to: CGPoint(x: width, y: height))
-                        path.addLine(to: CGPoint(x: 0, y: height))
-                        path.closeSubpath()
-                    }
-                    .fill(color.opacity(0.12))
-
-                    Path { path in
-                        path.move(to: points[0])
-                        points.dropFirst().forEach { path.addLine(to: $0) }
-                    }
-                    .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                }
-            } else {
-                Text("走势采集中...")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
         }
     }
 }
