@@ -192,18 +192,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refreshButton() {
         guard let button = statusItem?.button else { return }
 
+        // 常态只显示 App 图标；仅异常/启动中追加文字标记，用量看悬停 tooltip 与菜单
         let color: NSColor
         let text: String
 
         switch manager.state {
         case .ready:
-            if let pct = manager.shortTermUsage?.percentage ?? manager.weeklyUsage?.percentage {
-                color = pct >= 90 ? .systemRed : (pct >= 70 ? .systemOrange : .systemGreen)
-                text = "\(pct)%"
-            } else {
-                color = .secondaryLabelColor
-                text = ""
-            }
+            color = .controlAccentColor
+            text = ""
         case .error:
             color = .systemRed
             text = "!"
