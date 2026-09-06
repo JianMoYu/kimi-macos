@@ -164,6 +164,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         item.menu = menu
         statusItem = item
 
+        // 菜单栏展示：App 图标 + 用量百分比文字
+        item.button?.image = Self.makeMenuBarIcon()
+
         // 订阅状态与用量变化，实时刷新图标
         manager.$weeklyUsage
             .combineLatest(manager.$shortTermUsage, manager.$state)
@@ -172,6 +175,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .store(in: &cancellables)
 
         refreshButton()
+    }
+
+    /// 把 App 图标缩到菜单栏尺寸（16pt），彩色非模板
+    private static func makeMenuBarIcon() -> NSImage? {
+        guard let appIcon = NSApp.applicationIconImage else { return nil }
+        let target = NSSize(width: 16, height: 16)
+        let image = NSImage(size: target, flipped: false) { rect in
+            appIcon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     private func refreshButton() {
@@ -187,22 +202,26 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 text = "\(pct)%"
             } else {
                 color = .secondaryLabelColor
-                text = "Kimi"
+                text = ""
             }
         case .error:
             color = .systemRed
-            text = "Kimi"
+            text = "!"
         case .checking, .starting:
             color = .systemOrange
             text = "…"
         }
 
+        // 图标缺失时退回圆点，避免只剩光秃秃的数字
+        let prefix = (button.image == nil && !text.isEmpty) ? "● " : ""
         let attributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: color,
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         ]
-        button.attributedTitle = NSAttributedString(string: "● \(text)", attributes: attributes)
-        button.toolTip = "Kimi Code 用量与服务状态"
+        button.attributedTitle = NSAttributedString(string: prefix + text, attributes: attributes)
+        let shortPct = manager.shortTermUsage?.percentage
+        let weeklyPct = manager.weeklyUsage?.percentage
+        button.toolTip = "Kimi Code 服务状态\n5 小时限额 \(shortPct.map { "\($0)%" } ?? "—") · 周限额 \(weeklyPct.map { "\($0)%" } ?? "—")"
     }
 
     // 打开菜单时重建条目，保证用量/状态是最新的
@@ -232,7 +251,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(makeActionItem("重启后台服务", #selector(restartService)))
         menu.addItem(makeActionItem("在终端打开 tmux", #selector(attachTerminal)))
         menu.addItem(.separator())
-        menu.addItem(makeActionItem("退出 Kimi Code", #selector(NSApplication.terminate(_:))))
+        // 退出走响应链（target 为 nil），正确路由到 NSApplication.terminate
+        menu.addItem(NSMenuItem(title: "退出 Kimi Code", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     private func makeInfoItem(_ title: String) -> NSMenuItem {

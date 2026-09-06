@@ -450,10 +450,17 @@ struct UsageDetailRow: View {
                         .frame(width: geo.size.width * min(1.0, Double(usage.percentage) / 100.0))
                 }
             }
-            .frame(height: 4)
+            .frame(height: 3)
 
-            UsageSparkline(values: history, color: usageColor(percentage: usage.percentage))
-                .frame(height: 28)
+            // 采样足够才画走势，否则只是几条误读为「杂线」的水平线
+            if history.count >= 10 {
+                Text("近期走势")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(.top, 2)
+                UsageSparkline(values: history, color: usageColor(percentage: usage.percentage))
+                    .frame(height: 26)
+            }
         }
     }
 }
@@ -469,19 +476,28 @@ struct UsageSparkline: View {
             if values.count >= 2 {
                 let width = geo.size.width
                 let height = geo.size.height
-                Path { path in
-                    for (index, value) in values.enumerated() {
-                        let x = width * CGFloat(index) / CGFloat(values.count - 1)
-                        let clamped = min(100, max(0, value))
-                        let y = height * (1.0 - CGFloat(clamped) / 100.0)
-                        if index == 0 {
-                            path.move(to: CGPoint(x: x, y: y))
-                        } else {
-                            path.addLine(to: CGPoint(x: x, y: y))
-                        }
-                    }
+                let points: [CGPoint] = values.enumerated().map { index, value in
+                    CGPoint(
+                        x: width * CGFloat(index) / CGFloat(values.count - 1),
+                        y: height * (1.0 - CGFloat(min(100, max(0, value))) / 100.0)
+                    )
                 }
-                .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                ZStack {
+                    Path { path in
+                        path.move(to: points[0])
+                        points.dropFirst().forEach { path.addLine(to: $0) }
+                        path.addLine(to: CGPoint(x: width, y: height))
+                        path.addLine(to: CGPoint(x: 0, y: height))
+                        path.closeSubpath()
+                    }
+                    .fill(color.opacity(0.12))
+
+                    Path { path in
+                        path.move(to: points[0])
+                        points.dropFirst().forEach { path.addLine(to: $0) }
+                    }
+                    .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                }
             } else {
                 Text("走势采集中...")
                     .font(.system(size: 10))
