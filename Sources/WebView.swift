@@ -4,10 +4,12 @@ import WebKit
 public struct KimiWebView: NSViewRepresentable {
     let url: URL
     @Binding var reloadTrigger: UUID
+    @Binding var estimatedProgress: Double
 
-    public init(url: URL, reloadTrigger: Binding<UUID>) {
+    public init(url: URL, reloadTrigger: Binding<UUID>, estimatedProgress: Binding<Double> = .constant(0.0)) {
         self.url = url
         self._reloadTrigger = reloadTrigger
+        self._estimatedProgress = estimatedProgress
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -25,8 +27,61 @@ public struct KimiWebView: NSViewRepresentable {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         #endif
 
-        // 注册页面 → 原生的通知桥（须在创建 WebView 前注册）
+        // 注册页面 → 原生的通知桥与 Agent 遥测桥
         config.userContentController.add(context.coordinator, name: "kimiNotify")
+        config.userContentController.add(context.coordinator, name: "kimiTelemetry")
+
+        // 注入 WebSocket 监听脚本（捕获 Agent 事件、SubAgent、Token 速度与缓存）
+        let telemetryShim = """
+        (function() {
+            try {
+                const OrigWS = window.WebSocket;
+                if (!OrigWS || window.__kimi_ws_hooked__) return;
+                window.__kimi_ws_hooked__ = true;
+                window.WebSocket = function(url, protocols) {
+                    const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+                    ws.addEventListener('message', function(event) {
+                        try {
+                            if (typeof event.data === 'string') {
+                                const text = event.data;
+                                if (text.includes('usage') || text.includes('token') || text.includes('subagent') || text.includes('agent') || text.includes('step.') || text.includes('turn.') || text.includes('streamDuration') || text.includes('firstToken') || text.includes('dock') || text.includes('task') || text.includes('busy') || text.includes('pending_interaction') || text.includes('session_id')) {
+                                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
+                                        window.webkit.messageHandlers.kimiTelemetry.postMessage(text);
+                                    }
+                                }
+                            }
+                        } catch(err) {}
+                    });
+                    const origSend = ws.send;
+                    ws.send = function(data) {
+                        try {
+                            if (typeof data === 'string' && (data.includes('session_id') || data.includes('subscribe'))) {
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
+                                    window.webkit.messageHandlers.kimiTelemetry.postMessage(data);
+                                }
+                            }
+                        } catch(e) {}
+                        return origSend.apply(this, arguments);
+                    };
+                    return ws;
+                };
+                window.WebSocket.prototype = OrigWS.prototype;
+
+                // 监听 URL 或前端状态切换会话
+                window.addEventListener('hashchange', function() {
+                    const m = window.location.href.match(/session_[a-zA-Z0-9\\-]+/);
+                    if (m && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
+                        window.webkit.messageHandlers.kimiTelemetry.postMessage(JSON.stringify({
+                            type: "session_switched",
+                            session_id: m[0]
+                        }));
+                    }
+                });
+            } catch(e) {}
+        })();
+        """
+        let telemetryScript = WKUserScript(source: telemetryShim, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.addUserScript(telemetryScript)
 
         // 页面 Notification API shim：kimi web 任务完成时若调用 Notification，
         // 自动授予权限并转发给原生本地通知（窗口隐藏后也能收到提醒）。
@@ -136,6 +191,16 @@ public struct KimiWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
 
+        // 监听网页加载真实进度
+        context.coordinator.progressObservation = webView.observe(
+            \.estimatedProgress,
+            options: [.new]
+        ) { [weak coordinator = context.coordinator] wv, _ in
+            DispatchQueue.main.async {
+                coordinator?.parent.estimatedProgress = wv.estimatedProgress
+            }
+        }
+
         let request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30)
         webView.load(request)
 
@@ -157,6 +222,8 @@ public struct KimiWebView: NSViewRepresentable {
         var lastReloadID: UUID?
         /// 跟随系统外观更新加载底色用的 KVO 句柄
         var appearanceObservation: NSKeyValueObservation?
+        /// 页面加载进度 KVO
+        var progressObservation: NSKeyValueObservation?
 
         init(_ parent: KimiWebView) {
             self.parent = parent
@@ -208,12 +275,17 @@ public struct KimiWebView: NSViewRepresentable {
             return nil
         }
 
-        // MARK: - 页面通知桥
+        // MARK: - 页面通知桥与 Agent 遥测桥
 
         public func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            if message.name == "kimiTelemetry", let raw = message.body as? String {
+                AgentTelemetryManager.shared.handleIncomingTelemetryJSON(raw)
+                return
+            }
+
             guard message.name == "kimiNotify" else { return }
             var title = "Kimi Code"
             var body = ""

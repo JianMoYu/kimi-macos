@@ -26,6 +26,7 @@ swiftc -O \
     -framework SwiftUI \
     -framework AppKit \
     -framework WebKit \
+    "${ROOT_DIR}/Sources/AgentTelemetryManager.swift" \
     "${ROOT_DIR}/Sources/KimiServiceManager.swift" \
     "${ROOT_DIR}/Sources/Notifications.swift" \
     "${ROOT_DIR}/Sources/WebView.swift" \

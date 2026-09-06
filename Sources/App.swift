@@ -221,7 +221,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         button.attributedTitle = NSAttributedString(string: prefix + text, attributes: attributes)
         let shortPct = manager.shortTermUsage?.percentage
         let weeklyPct = manager.weeklyUsage?.percentage
-        button.toolTip = "Kimi Code 服务状态\n5 小时限额 \(shortPct.map { "\($0)%" } ?? "—") · 周限额 \(weeklyPct.map { "\($0)%" } ?? "—")"
+        let telemetry = AgentTelemetryManager.shared
+        var agentStatus = telemetry.isBusy ? "⚡️ Agent 运行中" : "Agent 就绪"
+        if !telemetry.subAgents.isEmpty {
+            agentStatus += " (\(telemetry.subAgents.count) 个 SubAgent)"
+        }
+        button.toolTip = "Kimi Code 服务状态\n\(agentStatus)\n5 小时限额 \(shortPct.map { "\($0)%" } ?? "—") · 周限额 \(weeklyPct.map { "\($0)%" } ?? "—")"
     }
 
     // 打开菜单时重建条目，保证用量/状态是最新的
@@ -237,6 +242,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         case .checking, .starting:
             menu.addItem(makeInfoItem("服务启动中..."))
         }
+
+        let telemetry = AgentTelemetryManager.shared
+        if telemetry.isBusy {
+            let speedText = telemetry.tokensPerSecond > 0 ? " · ⚡️ \(Int(telemetry.tokensPerSecond)) tok/s" : ""
+            menu.addItem(makeInfoItem("Agent 生成中\(speedText)"))
+        } else if telemetry.contextTokens > 0 {
+            let cacheText = telemetry.cacheHitRate > 0 ? " · 🎯 \(Int(telemetry.cacheHitRate))% 缓存" : ""
+            menu.addItem(makeInfoItem("Context: \(formatTokenCount(telemetry.contextTokens))\(cacheText)"))
+        }
+        if !telemetry.subAgents.isEmpty {
+            let workingCount = telemetry.subAgents.filter { $0.status == "working" }.count
+            menu.addItem(makeInfoItem("SubAgent: \(telemetry.subAgents.count) 个 (\(workingCount) 活跃)"))
+        }
+
+        menu.addItem(.separator())
 
         if let weekly = manager.weeklyUsage {
             menu.addItem(makeInfoItem("周限额 \(weekly.percentage)% · \(weekly.resetRemainingText ?? "—")"))
