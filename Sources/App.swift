@@ -100,8 +100,9 @@ struct WindowAccessor: NSViewRepresentable {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 内嵌 Web UI 固定深色，窗口外观锁死深色保持上下统一
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        // 外观跟随系统：kimi web UI 自带 light/dark 双主题（其 CSS 依赖
+        // prefers-color-scheme，而 WKWebView 继承窗口外观），锁定外观会
+        // 连带强制页面主题；加载底色的深浅适配在 WebView 侧处理。
 
         // 本地通知（配额预警 / 任务完成提醒）
         AppNotifications.requestAuthorization()

@@ -124,7 +124,14 @@ public struct KimiWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         if #available(macOS 12.0, *) {
-            webView.underPageBackgroundColor = NSColor(calibratedRed: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+            // 加载底色跟随系统外观：深色给深底、浅色给白底，避免闪色
+            context.coordinator.applyUnderPageBackground(to: webView)
+            context.coordinator.appearanceObservation = webView.observe(
+                \.effectiveAppearance,
+                options: [.initial]
+            ) { [weak coordinator = context.coordinator] webView, _ in
+                coordinator?.applyUnderPageBackground(to: webView)
+            }
         }
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -148,10 +155,19 @@ public struct KimiWebView: NSViewRepresentable {
         var parent: KimiWebView
         weak var webView: WKWebView?
         var lastReloadID: UUID?
+        /// 跟随系统外观更新加载底色用的 KVO 句柄
+        var appearanceObservation: NSKeyValueObservation?
 
         init(_ parent: KimiWebView) {
             self.parent = parent
             self.lastReloadID = parent.reloadTrigger
+        }
+
+        func applyUnderPageBackground(to webView: WKWebView) {
+            let isDark = webView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            webView.underPageBackgroundColor = isDark
+                ? NSColor(calibratedRed: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+                : NSColor.white
         }
 
         // MARK: - 导航策略：外链一律交给系统浏览器，避免把整个 App 导航走
