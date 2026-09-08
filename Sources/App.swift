@@ -167,11 +167,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         // 菜单栏展示：App 图标 + 用量百分比文字
         item.button?.image = Self.makeMenuBarIcon()
 
-        // 订阅状态与用量变化，实时刷新图标
+        // 订阅状态、用量与 Agent 运行态，实时刷新图标
         manager.$weeklyUsage
-            .combineLatest(manager.$shortTermUsage, manager.$state)
+            .combineLatest(manager.$shortTermUsage, manager.$state, AgentTelemetryManager.shared.$isBusy)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _, _ in self?.refreshButton() }
+            .sink { [weak self] _, _, _, _ in self?.refreshButton() }
+            .store(in: &cancellables)
+
+        // 生成速率单独订阅，让菜单栏的 tok/s 实时跳动
+        AgentTelemetryManager.shared.$tokensPerSecond
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshButton() }
             .store(in: &cancellables)
 
         refreshButton()
@@ -196,14 +202,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func refreshButton() {
         guard let button = statusItem?.button else { return }
 
-        // 常态只显示 App 图标；仅异常/启动中追加文字标记，用量看悬停 tooltip 与菜单
+        // 常态只显示 App 图标；Agent 运行时追加生成速率（对 Agent 开发需一眼可见）；
+        // 异常「!」、启动中「…」。用量与 Token 明细走悬停 tooltip 与点开菜单。
         let color: NSColor
         let text: String
 
         switch manager.state {
         case .ready:
             color = .controlAccentColor
-            text = ""
+            let tps = AgentTelemetryManager.shared.tokensPerSecond
+            if AgentTelemetryManager.shared.isBusy {
+                text = tps > 0 ? "\(Int(tps))" : "●"
+            } else {
+                text = ""
+            }
         case .error:
             color = .systemRed
             text = "!"
@@ -226,7 +238,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if !telemetry.subAgents.isEmpty {
             agentStatus += " (\(telemetry.subAgents.count) 个 SubAgent)"
         }
-        button.toolTip = "Kimi Code 服务状态\n\(agentStatus)\n5 小时限额 \(shortPct.map { "\($0)%" } ?? "—") · 周限额 \(weeklyPct.map { "\($0)%" } ?? "—")"
+        let speedLine = telemetry.tokensPerSecond > 0 ? " · \(Int(telemetry.tokensPerSecond)) tok/s" : ""
+        button.toolTip = "Kimi Code 服务状态\n\(agentStatus)\(speedLine)\n5 小时限额 \(shortPct.map { "\($0)%" } ?? "—") · 周限额 \(weeklyPct.map { "\($0)%" } ?? "—")\nToken 会话 \(formatTokenCount(telemetry.sessionStats.totalTokens)) · 今日 \(formatTokenCount(telemetry.todayStats.totalTokens))"
     }
 
     // 打开菜单时重建条目，保证用量/状态是最新的
@@ -247,7 +260,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if telemetry.isBusy {
             let speedText = telemetry.tokensPerSecond > 0 ? " · ⚡️ \(Int(telemetry.tokensPerSecond)) tok/s" : ""
             menu.addItem(makeInfoItem("Agent 生成中\(speedText)"))
-        } else if telemetry.contextTokens > 0 {
+        } else if !inspectorVisible, telemetry.contextTokens > 0 {
+            // Context 与缓存命中率已常驻在信息面板，仅在面板隐藏时于此补偿显示
             let cacheText = telemetry.cacheHitRate > 0 ? " · 🎯 \(Int(telemetry.cacheHitRate))% 缓存" : ""
             menu.addItem(makeInfoItem("Context: \(formatTokenCount(telemetry.contextTokens))\(cacheText)"))
         }
@@ -264,9 +278,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let short = manager.shortTermUsage {
             menu.addItem(makeInfoItem("5小时限额 \(short.percentage)% · \(short.resetRemainingText ?? "—")"))
         }
+        if telemetry.sessionStats.totalTokens > 0 || telemetry.todayStats.totalTokens > 0 {
+            menu.addItem(makeInfoItem("Token 会话 \(formatTokenCount(telemetry.sessionStats.totalTokens)) · 今日 \(formatTokenCount(telemetry.todayStats.totalTokens))"))
+        }
 
         menu.addItem(.separator())
         menu.addItem(makeActionItem("打开 Kimi Code", #selector(openMainWindow)))
+        menu.addItem(makeActionItem(inspectorVisible ? "隐藏信息面板" : "显示信息面板", #selector(toggleInspector)))
         menu.addItem(makeActionItem("重新载入页面", #selector(reloadPage)))
         menu.addItem(makeActionItem("重启后台服务", #selector(restartService)))
         menu.addItem(makeActionItem("在终端打开 tmux", #selector(attachTerminal)))
@@ -306,5 +324,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func attachTerminal() {
         manager.openInTerminal()
+    }
+
+    /// 信息面板显示状态，与 ContentView 的 @AppStorage 共享同一个 UserDefaults key；
+    /// 未写入过该 key 时按默认显示处理（bool(forKey:) 对缺失键返回 false，需先判空）。
+    private var inspectorVisible: Bool {
+        if UserDefaults.standard.object(forKey: "KimiShowInspector") == nil { return true }
+        return UserDefaults.standard.bool(forKey: "KimiShowInspector")
+    }
+
+    @objc private func toggleInspector() {
+        openMainWindow()
+        UserDefaults.standard.set(!inspectorVisible, forKey: "KimiShowInspector")
     }
 }
