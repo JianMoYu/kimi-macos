@@ -7,7 +7,7 @@ import AppKit
 public struct SubAgentItem: Identifiable, Equatable {
     public let id: String
     public let name: String
-    public var status: String // "working", "completed", "idle", "failed"
+    public var status: String // "working", "completed", "unknown", "stale", "failed"
     public var roleDescription: String?
     public var parentId: String?
     public var lastActive: Date
@@ -633,39 +633,44 @@ public final class AgentTelemetryManager: ObservableObject {
     }
 
     /// 读取 sub-agent 自己的 wire.jsonl 末尾，判断它当前的运行状态。
-    /// 决策依据：sub-agent 自身的最后一次生命周期事件，而非 main agent 的 isBusy。
+    /// 决策依据：sub-agent 自身的生命周期事件配对，而非 main agent 的 isBusy。
     /// 状态机（按 wire.jsonl 中真实事件序列）：
-    ///   - 文件不存在 / 为空                          → "idle"
-    ///   - 最后一条是 step.begin/turn.prompt/prompt.accepted
-    ///         且时间戳在 30s 内                      → "working"
-    ///         否则（卡住/异常退出）                → "completed"
-    ///   - 最后一条是 turn.ended / prompt.completed
-    ///         reason=failed                         → "failed"
-    ///         其它                                  → "completed"
-    ///   - 最后一条是 step.end（无对应终态）         → "completed"
-    ///   - 没有任何 step/turn/prompt 事件             → "idle"
+    ///   - 文件不存在 / 为空 / 没有任何 step/turn/prompt 事件   → "unknown"（未知）
+    ///   - 末尾 begin 数量 > end 数量（净 begin 配对）           → "working"
+    ///   - 净配对 = 0 且最近一条是 end
+    ///         reason=failed                                      → "failed"
+    ///         其它                                              → "completed"
+    ///   - 净配对 = 0 且没有 end 事件但有 begin（残留 begin）   → "completed"
+    /// 兜底：若配对后是 working，但最后一次 begin 已超过 10 分钟没新事件，
+    ///       视为心跳丢失（"stale"）—— server 可能把 agent 挂住了，
+    ///       不要显示为 completed 误导用户「它已经正常做完」。
     /// 调用方：syncSessionDiskState() 每 4s 兜底重读；wire 帧实时事件由
     /// handleAgentOrTaskEvent 单独处理（更快的实时更新）。
     private func detectSubAgentLiveStatus(wireFile: String) -> String {
         guard !wireFile.isEmpty,
               FileManager.default.fileExists(atPath: wireFile),
               let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: wireFile)) else {
-            return "idle"
+            return "unknown"
         }
         defer { try? handle.close() }
 
         let fileSize = handle.seekToEndOfFile()
-        guard fileSize > 0 else { return "idle" }
+        guard fileSize > 0 else { return "unknown" }
         let readLength = min(fileSize, 16384)
         handle.seek(toFileOffset: fileSize - readLength)
         guard let text = String(data: handle.readDataToEndOfFile(), encoding: .utf8) else {
-            return "idle"
+            return "unknown"
         }
 
-        // 从后往前找最近一条生命周期事件（顶层 type 或 wrap 在 event.type 里）
-        var lastKind: String = ""   // "begin" / "end"
+        // 从后往前扫，维护 begin/end 配对计数。配对不只看"最近一条"——
+        // 一次完整 turn 通常是 step.begin → ... → step.end；
+        // 但 agent 串行多轮（多 prompt）时是 begin/end/begin/end 配对。
+        // 净 begin > 0 即"有未结束的回合"，语义最准确。
+        var beginCount = 0
+        var endCount = 0
+        var lastEventKind: String = ""    // "begin" / "end"（最后扫到的那条）
         var lastReason: String = ""
-        var lastTime: Double = 0
+        var lastBeginTime: Double = 0     // 最近一条 begin 的时间戳（用于 hang 兜底）
 
         for line in text.components(separatedBy: "\n").reversed() {
             if line.isEmpty { continue }
@@ -678,29 +683,40 @@ public final class AgentTelemetryManager: ObservableObject {
             let normalized = rawType.lowercased()
 
             if normalized == "step.begin" || normalized == "turn.prompt" || normalized == "prompt.accepted" {
-                lastKind = "begin"
-                lastTime = (obj["time"] as? Double) ?? 0
-                break
+                beginCount += 1
+                lastEventKind = "begin"
+                let t = (obj["time"] as? Double) ?? 0
+                if t > lastBeginTime { lastBeginTime = t }
             } else if normalized == "step.end" || normalized == "turn.ended" || normalized == "prompt.completed" {
-                lastKind = "end"
+                endCount += 1
+                lastEventKind = "end"
                 lastReason = (innerEvent?["reason"] as? String) ?? (obj["reason"] as? String) ?? ""
-                lastTime = (obj["time"] as? Double) ?? 0
-                break
             }
-            // 其它事件类型（context.append_message / llm.request / mcp.tools_discovered 等）继续往前找
+            // 其它事件类型（context.append_message / llm.request / mcp.tools_discovered 等）继续往前扫
         }
 
-        if lastKind == "begin" {
-            // step.begin 之后长时间没 step.end → 视为已停止（兜底）
-            if lastTime > 0 {
-                let ageMs = Date().timeIntervalSince1970 * 1000.0 - lastTime
-                if ageMs < 30_000 { return "working" }
+        if beginCount == 0 && endCount == 0 {
+            // wire 里一条生命周期事件都没有：可能是 server 恢复任务时没把它列入执行，
+            // 也可能是刚创建还没动过。App 侧无法区分，如实显示「未知」。
+            return "unknown"
+        }
+        if beginCount > endCount {
+            // 配对不闭合 → 有未结束的回合。兜底：
+            // 若最近一次 begin 已超过 10 分钟没新事件，按「心跳丢失」显示，
+            // 既不假装它还在跑，也不谎称它已正常完成。
+            if lastBeginTime > 0 {
+                let ageMs = Date().timeIntervalSince1970 * 1000.0 - lastBeginTime
+                if ageMs > 10 * 60 * 1000 {
+                    return "stale"
+                }
             }
-            return "completed"
-        } else if lastKind == "end" {
+            return "working"
+        }
+        // 配对闭合（或 begin < end，异常情况，按 end 处理）
+        if lastEventKind == "end" {
             return lastReason == "failed" ? "failed" : "completed"
         }
-        return "idle"
+        return "completed"
     }
 
     // MARK: - Token 统计（本地缓存 + 增量扫描）

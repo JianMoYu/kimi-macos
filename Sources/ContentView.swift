@@ -605,9 +605,9 @@ public struct AgentInspectorSidebar: View {
             }
             ForEach(telemetry.subAgents) { agent in
                 HStack(spacing: 7) {
-                    Image(systemName: agent.status == "failed" ? "exclamationmark.triangle.fill" : "cpu")
+                    Image(systemName: subAgentStatusIcon(agent.status))
                         .font(.system(size: 10))
-                        .foregroundColor(agent.status == "failed" ? .red : .accentColor)
+                        .foregroundColor(subAgentStatusIconColor(agent.status))
                     Text(agent.name)
                         .font(.system(size: 11))
                         .lineLimit(1)
@@ -629,7 +629,8 @@ public struct AgentInspectorSidebar: View {
         case "working": return "运行中"
         case "completed": return "已完成"
         case "failed": return "失败"
-        default: return "就绪"
+        case "stale": return "心跳丢失"
+        default: return "未知"
         }
     }
 
@@ -638,7 +639,30 @@ public struct AgentInspectorSidebar: View {
         case "working": return .cyan
         case "failed": return .red
         case "completed": return .green
+        case "stale": return .orange
         default: return .secondary
+        }
+    }
+
+    /// 状态图标：失败用三角警示，未知/心跳丢失用问号圆点（不是 cpu），
+    /// 让「看不出它在干嘛」的状态在图标层就能和正常运行的 agent 区分开。
+    private func subAgentStatusIcon(_ status: String) -> String {
+        switch status {
+        case "failed": return "exclamationmark.triangle.fill"
+        case "unknown": return "questionmark.circle"
+        case "stale": return "waveform.slash"
+        default: return "cpu"
+        }
+    }
+
+    /// 图标只在异常态（失败 / 心跳丢失 / 未知）跟着状态着色，正常运行态保持 accent 色，
+    /// 避免整列图标都变成彩色、抢走右侧状态文字的注意力。
+    private func subAgentStatusIconColor(_ status: String) -> Color {
+        switch status {
+        case "failed": return .red
+        case "stale": return .orange
+        case "unknown": return .secondary
+        default: return .accentColor
         }
     }
 
