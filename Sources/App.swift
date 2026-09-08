@@ -174,67 +174,46 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         manager.$weeklyUsage
             .combineLatest(manager.$shortTermUsage, manager.$state, AgentTelemetryManager.shared.$isBusy)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _, _, _ in self?.refreshButton() }
+            .sink { [weak self] _, _, _, _ in self?.refreshToolTip() }
             .store(in: &cancellables)
 
         // 生成速率单独订阅，让菜单栏的 tok/s 实时跳动
         AgentTelemetryManager.shared.$tokensPerSecond
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.refreshButton() }
+            .sink { [weak self] _ in self?.refreshToolTip() }
             .store(in: &cancellables)
 
-        refreshButton()
+        refreshToolTip()
     }
 
-    /// 把 App 图标画进菜单栏。macOS 菜单栏图标的标准满高是 22pt（macOS 11+），
-    /// 但 appIcon 的 1024x1024 画布里只有约 86% 是内容（圆角矩形 880x880 + 10% 系统留白）。
-    /// 旧实现（side=18, zoom=1.2）实际渲染 18pt → 被画布留白吞掉，圆角矩形只到 ~16pt，
-    /// 视觉上比微信、YD 等满高图标小一截。
-    /// 改为 side=22（菜单栏满高）+ zoom=1.0（不裁剪，让圆角矩形直接顶到画布边界），
-    /// 圆角矩形视觉高度 22*0.86 ≈ 18.9pt，与其它 22pt 满高图标基本等高。
+    /// 菜单栏图标：自绘单色 K 字母（template 图像），跟随系统菜单栏外观渲染为黑/白/反色。
+    /// 不复用彩色 app 图标 —— app icon 整体是不透明的深蓝圆角矩形，标 template 后会变成实心黑块，反而更丑。
+    /// 满高 22pt，K 字母在画布里居中（画布即模板的物理边界）。
     private static func makeMenuBarIcon() -> NSImage? {
-        guard let appIcon = NSApp.applicationIconImage else { return nil }
         let side: CGFloat = 22
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
-            appIcon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            let glyph = "K" as NSString
+            let font = NSFont.systemFont(ofSize: 19, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.black
+            ]
+            let textSize = glyph.size(withAttributes: attrs)
+            let origin = NSPoint(
+                x: (rect.width - textSize.width) / 2,
+                y: (rect.height - textSize.height) / 2 - 1
+            )
+            glyph.draw(at: origin, withAttributes: attrs)
             return true
         }
-        image.isTemplate = false
+        image.isTemplate = true
         return image
     }
 
-    private func refreshButton() {
+    private func refreshToolTip() {
         guard let button = statusItem?.button else { return }
 
-        // 常态只显示 App 图标；Agent 运行时追加生成速率（对 Agent 开发需一眼可见）；
-        // 异常「!」、启动中「…」。用量与 Token 明细走悬停 tooltip 与点开菜单。
-        let color: NSColor
-        let text: String
-
-        switch manager.state {
-        case .ready:
-            color = .controlAccentColor
-            let tps = AgentTelemetryManager.shared.tokensPerSecond
-            if AgentTelemetryManager.shared.isBusy {
-                text = tps > 0 ? "\(Int(tps))" : "●"
-            } else {
-                text = ""
-            }
-        case .error:
-            color = .systemRed
-            text = "!"
-        case .checking, .starting:
-            color = .systemOrange
-            text = "…"
-        }
-
-        // 图标缺失时退回圆点，避免只剩光秃秃的数字
-        let prefix = (button.image == nil && !text.isEmpty) ? "● " : ""
-        let attributes: [NSAttributedString.Key: Any] = [
-            .foregroundColor: color,
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        ]
-        button.attributedTitle = NSAttributedString(string: prefix + text, attributes: attributes)
+        // 菜单栏只显示纯图标，不带任何文字；状态、用量、Token 全部走悬停 tooltip 与菜单。
         let shortPct = manager.shortTermUsage?.percentage
         let weeklyPct = manager.weeklyUsage?.percentage
         let telemetry = AgentTelemetryManager.shared
