@@ -379,6 +379,22 @@ public final class AgentTelemetryManager: ObservableObject {
         } else {
             let item = SubAgentItem(id: id, name: displayName, status: status, parentId: parentId)
             subAgents.append(item)
+            subAgents = Self.sortedSubAgents(subAgents)
+        }
+    }
+
+    /// 按子 Agent 编号升序排序（"agent-12" → 12），编号无法解析的按 id 字典序排在后面。
+    /// 两条写入路径（ws 事件 upsert / 磁盘同步整体覆盖）都必须收口到这里，
+    /// 否则字典遍历 + 事件到达顺序会让面板顺序不停跳变。
+    static func sortedSubAgents(_ items: [SubAgentItem]) -> [SubAgentItem] {
+        items.sorted { a, b in
+            switch (Int(a.id.replacingOccurrences(of: "agent-", with: "")),
+                    Int(b.id.replacingOccurrences(of: "agent-", with: ""))) {
+            case let (na?, nb?): return na < nb
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.id < b.id
+            }
         }
     }
 
@@ -563,8 +579,10 @@ public final class AgentTelemetryManager: ObservableObject {
                 // 2) 现有 sub-agent 仍在 → 用 disk 真状态覆盖 status（disk 是 ground truth，
                 //    修正 ws 帧未及时送达或 main agent busy 时的误判）
                 // 3) 新出现 → append
-                // 直接用 discovered 数组覆盖，避免残留旧 session 的 sub-agent
-                self.subAgents = discoveredSubAgents
+                // 直接用 discovered 数组覆盖，避免残留旧 session 的 sub-agent。
+                // 覆盖前做稳定排序：agentsDict 是 Swift 字典，遍历顺序不确定，
+                // 不排序的话每 4s 重建后列表顺序会随机跳变。
+                self.subAgents = Self.sortedSubAgents(discoveredSubAgents)
             }
         }
     }
