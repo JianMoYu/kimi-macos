@@ -605,22 +605,40 @@ public struct AgentInspectorSidebar: View {
             }
             ForEach(telemetry.subAgents) { agent in
                 HStack(spacing: 7) {
-                    Image(systemName: "cpu")
+                    Image(systemName: agent.status == "failed" ? "exclamationmark.triangle.fill" : "cpu")
                         .font(.system(size: 10))
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(agent.status == "failed" ? .red : .accentColor)
                     Text(agent.name)
                         .font(.system(size: 11))
                         .lineLimit(1)
                     Spacer()
-                    Text(agent.status == "working" ? "运行中" : "就绪")
+                    Text(subAgentStatusText(agent.status))
                         .font(.system(size: 10))
-                        .foregroundColor(agent.status == "working" ? .cyan : .secondary)
+                        .foregroundColor(subAgentStatusColor(agent.status))
                 }
                 .padding(.vertical, 4)
                 .padding(.horizontal, 7)
                 .background(Color.secondary.opacity(0.05))
                 .cornerRadius(6)
             }
+        }
+    }
+
+    private func subAgentStatusText(_ status: String) -> String {
+        switch status {
+        case "working": return "运行中"
+        case "completed": return "已完成"
+        case "failed": return "失败"
+        default: return "就绪"
+        }
+    }
+
+    private func subAgentStatusColor(_ status: String) -> Color {
+        switch status {
+        case "working": return .cyan
+        case "failed": return .red
+        case "completed": return .green
+        default: return .secondary
         }
     }
 

@@ -106,6 +106,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 本地通知（配额预警 / 任务完成提醒）
         AppNotifications.requestAuthorization()
+        // 重置通知冷却：App 启动后 8s 内吞掉所有 kimiNotify，避免「打开 App → 旧
+        // session 残留通知补发」的反直觉行为。
+        NotificationGate.shared.resetLaunchTime()
 
         // 菜单栏常驻用量图标
         MenuBarController.shared.install()
@@ -183,16 +186,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         refreshButton()
     }
 
-    /// 把 App 图标画进菜单栏。macOS 图标画布自带约 10% 留白（圆角矩形约占 80%），
-    /// 直接等比缩到 16pt 会显得特别小：这里放大到 18pt 并超绘 ~1.2 倍裁掉画布留白，
-    /// 让可见图形接近菜单栏满高。
+    /// 把 App 图标画进菜单栏。macOS 菜单栏图标的标准满高是 22pt（macOS 11+），
+    /// 但 appIcon 的 1024x1024 画布里只有约 86% 是内容（圆角矩形 880x880 + 10% 系统留白）。
+    /// 旧实现（side=18, zoom=1.2）实际渲染 18pt → 被画布留白吞掉，圆角矩形只到 ~16pt，
+    /// 视觉上比微信、YD 等满高图标小一截。
+    /// 改为 side=22（菜单栏满高）+ zoom=1.0（不裁剪，让圆角矩形直接顶到画布边界），
+    /// 圆角矩形视觉高度 22*0.86 ≈ 18.9pt，与其它 22pt 满高图标基本等高。
     private static func makeMenuBarIcon() -> NSImage? {
         guard let appIcon = NSApp.applicationIconImage else { return nil }
-        let side: CGFloat = 18
-        let zoom: CGFloat = 1.2
-        let inset = -(side * zoom - side) / 2
+        let side: CGFloat = 22
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
-            appIcon.draw(in: rect.insetBy(dx: inset, dy: inset), from: .zero, operation: .sourceOver, fraction: 1.0)
+            appIcon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
             return true
         }
         image.isTemplate = false

@@ -151,6 +151,13 @@ public final class AgentTelemetryManager: ObservableObject {
         }
     }
     @Published public var currentSessionTitle: String? = nil
+    @Published public var currentSessionModel: String? = nil
+
+    /// 每个 model ID → max_context_size 缓存（来自 /api/v1/models）
+    /// session.usage.context_limit 服务端常返回 0（猜测是未初始化的占位），
+    /// 侧边栏的 context 分母就需要从这个缓存兜底。
+    /// 非 @Published：不参与 UI 重绘（只读缓存），避免每次轮询触发不必要的渲染。
+    public var modelContextLimits: [String: Int] = [:]
 
     private var pollTimer: Timer? = nil
     private var speedDecayTimer: Timer? = nil
@@ -167,6 +174,7 @@ public final class AgentTelemetryManager: ObservableObject {
     public init() {
         startBackgroundSync()
         syncFromLatestSession()
+        loadModelContextLimits()
         recalculateCumulativeStats()
     }
 
@@ -239,6 +247,15 @@ public final class AgentTelemetryManager: ObservableObject {
 
         if let usage = usageDict {
             applyUsageMetrics(usage)
+        }
+
+        // 4b. usage.record 等帧带 model 字段 → 实时更新当前 session 的模型与 contextLimit
+        // 不依赖 4s 轮询 /api/v1/sessions 的延迟。
+        if let liveModel = obj["model"] as? String, !liveModel.isEmpty {
+            self.currentSessionModel = liveModel
+            if let limit = modelContextLimits[liveModel], limit > 0, self.contextLimit != limit {
+                self.contextLimit = limit
+            }
         }
 
         // 5. 解析生成耗时与速度 (llmStreamDurationMs / llmFirstTokenLatencyMs)
@@ -322,8 +339,24 @@ public final class AgentTelemetryManager: ObservableObject {
     }
 
     private func handleAgentOrTaskEvent(eventType: String, obj: [String: Any]) {
+        // SubAgent 状态只在生命周期事件中更新：
+        //   - step.begin / turn.prompt / prompt.accepted        → working
+        //   - step.end / turn.ended / prompt.completed          → completed / failed
+        // 其它带 agentId 的帧（mcp.tools_discovered / runtime.set_binding / profile.bind /
+        // token_counting.turn_recorded 等通告类事件）一律跳过。
+        // 旧实现会把任何 agentId != main 的帧都 upsert 成 isBusy ? "working" : "idle"，
+        // main agent 一旦还在跑，所有 sub-agent 都跟着显示"运行中"。
         if let agentId = obj["agentId"] as? String, agentId != "main" {
-            upsertSubAgent(id: agentId, status: isBusy ? "working" : "idle")
+            let innerEvent = obj["event"] as? [String: Any]
+            let effectiveType = (innerEvent?["type"] as? String) ?? eventType
+            let normalized = effectiveType.lowercased()
+            if normalized == "step.begin" || normalized == "turn.prompt" || normalized == "prompt.accepted" {
+                upsertSubAgent(id: agentId, status: "working")
+            } else if normalized == "step.end" || normalized == "turn.ended" || normalized == "prompt.completed" {
+                let reason = (innerEvent?["reason"] as? String) ?? (obj["reason"] as? String)
+                upsertSubAgent(id: agentId, status: reason == "failed" ? "failed" : "completed")
+            }
+            // 其它 lifecycle 事件忽略；syncSessionDiskState 会每 4s 兜底重读 wire.jsonl
         }
 
         if eventType.contains("terminal") || eventType.contains("task") || eventType.contains("dock") {
@@ -390,6 +423,48 @@ public final class AgentTelemetryManager: ObservableObject {
         }.resume()
     }
 
+    /// 从 /api/v1/models 拉取 model ID → max_context_size 映射。
+    /// 用于补 session.usage.context_limit 缺失的情况（kimi server 实测常返回 0）。
+    /// 网络失败时静默保留旧缓存，下次 syncFromLatestSession 触发后会自动重试。
+    public func loadModelContextLimits() {
+        let port = KimiServiceManager.shared.port
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/v1/models") else { return }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0
+        if let token = KimiServiceManager.shared.fetchServerToken(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self = self,
+                  let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let items = (json["data"] as? [String: Any])?["items"] as? [[String: Any]]
+                ?? (json["data"] as? [[String: Any]]) else {
+                return
+            }
+
+            var mapping: [String: Int] = [:]
+            for item in items {
+                guard let model = item["model"] as? String,
+                      let limit = item["max_context_size"] as? Int,
+                      limit > 0 else { continue }
+                mapping[model] = limit
+            }
+
+            DispatchQueue.main.async {
+                self.modelContextLimits = mapping
+                // 缓存就绪后，若当前已有绑定的 session，立即用模型分母修正 contextLimit
+                if let model = self.currentSessionModel,
+                   let limit = mapping[model],
+                   self.contextLimit != limit {
+                    self.contextLimit = limit
+                }
+            }
+        }.resume()
+    }
+
     private func applySessionSummary(_ session: [String: Any]) {
         guard let sid = session["id"] as? String else { return }
         self.currentSessionId = sid
@@ -400,6 +475,10 @@ public final class AgentTelemetryManager: ObservableObject {
             updatePendingInteraction(pi)
         }
 
+        // 记录当前 session 的 model ID，用于 /api/v1/models 缓存就绪时回填 contextLimit
+        let sessionModel = (session["agent_config"] as? [String: Any])?["model"] as? String
+        self.currentSessionModel = sessionModel
+
         if let usage = session["usage"] as? [String: Any] {
             if let inTokens = usage["input_tokens"] as? Int, inTokens > 0 {
                 applyUsageMetrics(usage)
@@ -407,7 +486,13 @@ public final class AgentTelemetryManager: ObservableObject {
             if let ctx = usage["context_tokens"] as? Int, ctx > 0 {
                 self.contextTokens = ctx
             }
+            // context_limit 兜底链：
+            // 1) usage.context_limit > 0（首选，但实测 kimi server 常返回 0 占位）
+            // 2) session.agent_config.model → /api/v1/models 缓存的 max_context_size
+            // 3) 都不命中：保持上次的 contextLimit（默认 262144，留给调用方观察）
             if let limit = usage["context_limit"] as? Int, limit > 0 {
+                self.contextLimit = limit
+            } else if let model = sessionModel, let limit = modelContextLimits[model], limit > 0 {
                 self.contextLimit = limit
             }
         }
@@ -454,10 +539,16 @@ public final class AgentTelemetryManager: ObservableObject {
                     if agentId == "main" { continue }
                     let parentId = agentInfo["parentAgentId"] as? String ?? "main"
                     let name = "子 Agent · \(agentId.replacingOccurrences(of: "agent-", with: ""))"
+                    let agentHome = agentInfo["homedir"] as? String
+                    let wireFile = agentHome.map { "\($0)/wire.jsonl" } ?? ""
+                    // 每个 sub-agent 独立判断：扫它自己 wire.jsonl 末尾的 step / turn 事件，
+                    // 不再跟随 main agent 的 isBusy。否则只要 main 还在工作，
+                    // 已完成的 sub-agent 也会被全部显示为"运行中"。
+                    let status = detectSubAgentLiveStatus(wireFile: wireFile)
                     discoveredSubAgents.append(SubAgentItem(
                         id: agentId,
                         name: name,
-                        status: self.isBusy ? "working" : "idle",
+                        status: status,
                         parentId: parentId
                     ))
                 }
@@ -467,17 +558,13 @@ public final class AgentTelemetryManager: ObservableObject {
             self.readTailWireMetrics(filePath: wireFile)
 
             DispatchQueue.main.async {
-                if !discoveredSubAgents.isEmpty {
-                    var merged = self.subAgents
-                    for newAgent in discoveredSubAgents {
-                        if let idx = merged.firstIndex(where: { $0.id == newAgent.id }) {
-                            merged[idx].parentId = newAgent.parentId
-                        } else {
-                            merged.append(newAgent)
-                        }
-                    }
-                    self.subAgents = merged
-                }
+                // 用 disk 上判定的真实状态覆盖运行时数组：
+                // 1) 现有 sub-agent 但已不在本 session → 移除（切会话/被回收的残留）
+                // 2) 现有 sub-agent 仍在 → 用 disk 真状态覆盖 status（disk 是 ground truth，
+                //    修正 ws 帧未及时送达或 main agent busy 时的误判）
+                // 3) 新出现 → append
+                // 直接用 discovered 数组覆盖，避免残留旧 session 的 sub-agent
+                self.subAgents = discoveredSubAgents
             }
         }
     }
@@ -525,6 +612,77 @@ public final class AgentTelemetryManager: ObservableObject {
             }
             if foundUsage && foundCount { break }
         }
+    }
+
+    /// 读取 sub-agent 自己的 wire.jsonl 末尾，判断它当前的运行状态。
+    /// 决策依据：sub-agent 自身的最后一次生命周期事件，而非 main agent 的 isBusy。
+    /// 状态机（按 wire.jsonl 中真实事件序列）：
+    ///   - 文件不存在 / 为空                          → "idle"
+    ///   - 最后一条是 step.begin/turn.prompt/prompt.accepted
+    ///         且时间戳在 30s 内                      → "working"
+    ///         否则（卡住/异常退出）                → "completed"
+    ///   - 最后一条是 turn.ended / prompt.completed
+    ///         reason=failed                         → "failed"
+    ///         其它                                  → "completed"
+    ///   - 最后一条是 step.end（无对应终态）         → "completed"
+    ///   - 没有任何 step/turn/prompt 事件             → "idle"
+    /// 调用方：syncSessionDiskState() 每 4s 兜底重读；wire 帧实时事件由
+    /// handleAgentOrTaskEvent 单独处理（更快的实时更新）。
+    private func detectSubAgentLiveStatus(wireFile: String) -> String {
+        guard !wireFile.isEmpty,
+              FileManager.default.fileExists(atPath: wireFile),
+              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: wireFile)) else {
+            return "idle"
+        }
+        defer { try? handle.close() }
+
+        let fileSize = handle.seekToEndOfFile()
+        guard fileSize > 0 else { return "idle" }
+        let readLength = min(fileSize, 16384)
+        handle.seek(toFileOffset: fileSize - readLength)
+        guard let text = String(data: handle.readDataToEndOfFile(), encoding: .utf8) else {
+            return "idle"
+        }
+
+        // 从后往前找最近一条生命周期事件（顶层 type 或 wrap 在 event.type 里）
+        var lastKind: String = ""   // "begin" / "end"
+        var lastReason: String = ""
+        var lastTime: Double = 0
+
+        for line in text.components(separatedBy: "\n").reversed() {
+            if line.isEmpty { continue }
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            let innerEvent = obj["event"] as? [String: Any]
+            let rawType = (innerEvent?["type"] as? String) ?? (obj["type"] as? String) ?? ""
+            let normalized = rawType.lowercased()
+
+            if normalized == "step.begin" || normalized == "turn.prompt" || normalized == "prompt.accepted" {
+                lastKind = "begin"
+                lastTime = (obj["time"] as? Double) ?? 0
+                break
+            } else if normalized == "step.end" || normalized == "turn.ended" || normalized == "prompt.completed" {
+                lastKind = "end"
+                lastReason = (innerEvent?["reason"] as? String) ?? (obj["reason"] as? String) ?? ""
+                lastTime = (obj["time"] as? Double) ?? 0
+                break
+            }
+            // 其它事件类型（context.append_message / llm.request / mcp.tools_discovered 等）继续往前找
+        }
+
+        if lastKind == "begin" {
+            // step.begin 之后长时间没 step.end → 视为已停止（兜底）
+            if lastTime > 0 {
+                let ageMs = Date().timeIntervalSince1970 * 1000.0 - lastTime
+                if ageMs < 30_000 { return "working" }
+            }
+            return "completed"
+        } else if lastKind == "end" {
+            return lastReason == "failed" ? "failed" : "completed"
+        }
+        return "idle"
     }
 
     // MARK: - Token 统计（本地缓存 + 增量扫描）

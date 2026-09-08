@@ -334,6 +334,11 @@ public struct KimiWebView: NSViewRepresentable {
             }
 
             guard message.name == "kimiNotify" else { return }
+            // 启动冷却期内的通知直接吞掉。kimi web 在 App 启动 / 重新加载页面后
+            // 会按 session 状态补一次「任务完成」通知，属于历史残留（任务在 App
+            // 关闭期间已经完成，前端在恢复时只是重放），与用户当前操作无关。
+            if NotificationGate.shared.isInQuietPeriod { return }
+
             var title = "Kimi Code"
             var body = ""
             if let raw = message.body as? String,
