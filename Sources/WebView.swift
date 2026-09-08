@@ -32,40 +32,87 @@ public struct KimiWebView: NSViewRepresentable {
         config.userContentController.add(context.coordinator, name: "kimiTelemetry")
 
         // 注入 WebSocket 监听脚本（捕获 Agent 事件、SubAgent、Token 速度与缓存）
+        // 注意：必须保留 window.WebSocket 的身份（静态常量 CONNECTING/OPEN/CLOSING/CLOSED
+        // 与 prototype）。前端 Kimi web 的 stream 状态机会读 WebSocket.OPEN 等常量做
+        // readyState 比较；如果直接覆盖构造器丢失这些常量，stream 会卡在「请求中」。
+        // 修复点：仅 wrap 实例的 addEventListener 与 send，原型链与静态属性全部保留。
         let telemetryShim = """
         (function() {
             try {
                 const OrigWS = window.WebSocket;
                 if (!OrigWS || window.__kimi_ws_hooked__) return;
                 window.__kimi_ws_hooked__ = true;
-                window.WebSocket = function(url, protocols) {
+
+                const FILTER_TOKENS = ['usage','token','subagent','agent','step.','turn.','streamDuration','firstToken','dock','task','busy','pending_interaction','session_id'];
+
+                function HookedWS(url, protocols) {
                     const ws = protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
-                    ws.addEventListener('message', function(event) {
-                        try {
-                            if (typeof event.data === 'string') {
-                                const text = event.data;
-                                if (text.includes('usage') || text.includes('token') || text.includes('subagent') || text.includes('agent') || text.includes('step.') || text.includes('turn.') || text.includes('streamDuration') || text.includes('firstToken') || text.includes('dock') || text.includes('task') || text.includes('busy') || text.includes('pending_interaction') || text.includes('session_id')) {
-                                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
-                                        window.webkit.messageHandlers.kimiTelemetry.postMessage(text);
+
+                    // 包装 addEventListener：仅拦截 'message' 事件做 telemetry 转发，
+                    // 不影响 open/close/error/其他 message 监听器的多路注册语义。
+                    const origAdd = ws.addEventListener.bind(ws);
+                    ws.addEventListener = function(type, listener, options) {
+                        if (type === 'message' && typeof listener === 'function') {
+                            const wrapped = function(ev) {
+                                try {
+                                    if (typeof ev.data === 'string') {
+                                        const text = ev.data;
+                                        for (let i = 0; i < FILTER_TOKENS.length; i++) {
+                                            if (text.indexOf(FILTER_TOKENS[i]) !== -1) {
+                                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
+                                                    window.webkit.messageHandlers.kimiTelemetry.postMessage(text);
+                                                }
+                                                break;
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                        } catch(err) {}
-                    });
-                    const origSend = ws.send;
+                                } catch (err) {}
+                                return listener.call(this, ev);
+                            };
+                            return origAdd(type, wrapped, options);
+                        }
+                        return origAdd(type, listener, options);
+                    };
+
+                    const origSend = ws.send.bind(ws);
                     ws.send = function(data) {
                         try {
-                            if (typeof data === 'string' && (data.includes('session_id') || data.includes('subscribe'))) {
+                            if (typeof data === 'string' && (data.indexOf('session_id') !== -1 || data.indexOf('subscribe') !== -1)) {
                                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.kimiTelemetry) {
                                     window.webkit.messageHandlers.kimiTelemetry.postMessage(data);
                                 }
                             }
-                        } catch(e) {}
-                        return origSend.apply(this, arguments);
+                        } catch (e) {}
+                        return origSend(data);
                     };
+
+                    // 直接返回原生 ws 实例，避免再次 new 引发的 prototype 链断裂。
                     return ws;
-                };
-                window.WebSocket.prototype = OrigWS.prototype;
+                }
+
+                // 保留 WebSocket 身份：prototype + 全部静态属性
+                // （CONNECTING/OPEN/CLOSING/CLOSED 必须在 HookedWS 上可读，
+                //  否则前端 stream 状态机立刻坏掉，spinner 永远停不下来）。
+                HookedWS.prototype = OrigWS.prototype;
+                Object.setPrototypeOf(HookedWS, OrigWS);
+                const STATIC_KEYS = ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'];
+                for (let i = 0; i < STATIC_KEYS.length; i++) {
+                    const k = STATIC_KEYS[i];
+                    try { HookedWS[k] = OrigWS[k]; } catch (e) {}
+                }
+                // 兜底：复制浏览器可能定义的其他静态属性（兼容性扩展）
+                const origKeys = Object.getOwnPropertyNames(OrigWS);
+                for (let i = 0; i < origKeys.length; i++) {
+                    const k = origKeys[i];
+                    if (!(k in HookedWS)) {
+                        try {
+                            const desc = Object.getOwnPropertyDescriptor(OrigWS, k);
+                            if (desc) Object.defineProperty(HookedWS, k, desc);
+                        } catch (e) {}
+                    }
+                }
+
+                window.WebSocket = HookedWS;
 
                 // 监听 URL 或前端状态切换会话
                 window.addEventListener('hashchange', function() {
