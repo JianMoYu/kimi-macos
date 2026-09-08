@@ -291,13 +291,19 @@ public struct KimiWebView: NSViewRepresentable {
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            guard let url = navigationAction.request.url, let host = url.host else {
+            guard let url = navigationAction.request.url, url.host != nil else {
                 decisionHandler(.allow)
                 return
             }
-            let isLocal = host == "127.0.0.1" || host == "localhost"
+            // 仅允许与 App 自身同源（scheme+host+port 一致）的导航留在 WebView 内。
+            // Agent 会话里的预览链接（如 http://localhost:4311/...）虽是本机地址，
+            // 但属于另一套页面：留在 App 内会整页替换掉会话界面且无法返回，
+            // 因此一律交给系统浏览器打开。
+            let isSameOrigin = url.scheme == parent.url.scheme
+                && url.host == parent.url.host
+                && url.port == parent.url.port
             let isUserLink = navigationAction.navigationType == .linkActivated
-            if !isLocal && (isUserLink || navigationAction.targetFrame == nil) {
+            if !isSameOrigin && (isUserLink || navigationAction.targetFrame == nil) {
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
                 return
@@ -305,7 +311,7 @@ public struct KimiWebView: NSViewRepresentable {
             decisionHandler(.allow)
         }
 
-        // MARK: - target="_blank" / window.open：本机链接在当前 WebView 加载，外链走系统浏览器
+        // MARK: - target="_blank" / window.open：同源链接在当前 WebView 加载，其余走系统浏览器
 
         public func webView(
             _ webView: WKWebView,
@@ -314,10 +320,13 @@ public struct KimiWebView: NSViewRepresentable {
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
             guard let url = navigationAction.request.url else { return nil }
-            if let host = url.host, host != "127.0.0.1" && host != "localhost" {
-                NSWorkspace.shared.open(url)
-            } else {
+            let isSameOrigin = url.scheme == parent.url.scheme
+                && url.host == parent.url.host
+                && url.port == parent.url.port
+            if isSameOrigin {
                 webView.load(URLRequest(url: url))
+            } else {
+                NSWorkspace.shared.open(url)
             }
             return nil
         }
